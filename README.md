@@ -37,7 +37,7 @@ agent-orchestrator finish ROOT_TASK_ID \
 
 `ROOT_TASK_ID` is required. The run contains only that task and its transitive `blocked_by` dependencies; unrelated queue items are never claimed. The orchestrator rejects missing tasks, missing blockers, duplicate IDs, dependency cycles, plan drift, foreign run ownership, and unowned `in_progress` work before dispatching more work.
 
-`--once` performs one reconciliation/dispatch pass and returns `active` or `complete`. Without it, the command polls every `--poll-seconds` (default `5`). `--lease-seconds` sets the worker deadline (default `900`); expiry stops the run for an explicit decision rather than starting a replacement.
+`--once` performs one reconciliation/dispatch pass and returns `active` or `complete`. Without it, the command polls every `--poll-seconds` (default `5`). `--lease-seconds` is an inactivity lease (default `900`): each successful Agent ID and Herdr observation renews it; transient observation failures remain recorded and become terminal only after the lease expires.
 
 ## Worktrees, branches, and queue access
 
@@ -48,15 +48,15 @@ Each claimed task receives:
 - an absolute `.sift/issues.jsonl` symlink to the canonical queue;
 - an AgentMail handoff containing task/run IDs, canonical queue, worktree, branch, dependencies, acceptance criteria, and validation commands.
 
-The default worktree root is the repository parent. A task without blockers starts at the repository's current `HEAD`. A task with one closed blocker starts from that blocker's branch. With multiple closed blockers, exactly one blocker branch must descend from all others; otherwise the orchestrator refuses an ambiguous convergence. This stacking makes the final root branch include its dependency commits without an orchestrator-side merge.
+The default worktree root is the repository parent. A task without blockers starts at the repository's current `HEAD`. Existing branches from closed blockers are used as stack bases; closed blockers without an orchestration branch are treated as already integrated into `HEAD`. With multiple existing blocker branches, exactly one must descend from all others; otherwise the orchestrator refuses an ambiguous convergence. This stacking makes the final root branch include its dependency commits without an orchestrator-side merge.
 
-Existing branches, worktrees, or queue paths are never replaced. `finish` does not merge worker branches or remove worker worktrees.
+Existing branches, worktrees, or untracked queue paths are never replaced. If Git checked out the canonical tracked `.sift/issues.jsonl` path into a worker, the orchestrator marks that path `skip-worktree` before replacing the copy with the canonical absolute symlink. Re-running queue-link setup is idempotent. `finish` does not merge worker branches or remove worker worktrees.
 
 ## Durable ledger and reconciliation
 
-The default state directory is `<repo-parent>/.agent-orchestrator/<repository-name>`; `--state-dir` overrides it. `<root-task-id>.json` records the run ID, immutable plan snapshot, canonical paths, orchestrator identity, and every task's branch, worktree, Herdr handles, worker identity, handoff receipt, lease, heartbeat, and report. `<root-task-id>.lock` prevents concurrent orchestration of the same root.
+The default state directory is `<repo-parent>/.agent-orchestrator/<repository-name>`; `--state-dir` overrides it. `<root-task-id>.json` records the ULID run ID, created/updated Unix timestamps, immutable plan snapshot, canonical paths, orchestrator identity, and every task's branch, worktree, Herdr handles, worker identity, handoff receipt, rolling lease, heartbeat, last observation error, report message ID, and complete report body. `<root-task-id>.lock` prevents concurrent orchestration of the same root.
 
-A retained ledger must match the requested root, queue, repository, worktree root, orchestrator identity, and current SQ plan. Runtime-only SQ changes—status, timestamps, and matching run ownership—do not count as plan drift. Interrupted provisioning, reset/reopened tasks, replaced or lost identities, missing worktrees, wrong branches, blocked workers, settled workers without reports, and expired leases stop the run. Terminal blocked/failed reports remain terminal on later invocations; they are never retried implicitly.
+A retained ledger must match the requested root, queue, repository, worktree root, orchestrator identity, and current SQ plan. Runtime-only SQ changes—status, timestamps, and matching run ownership—do not count as plan drift. Interrupted provisioning, reset/reopened tasks, replaced identities, missing worktrees, wrong branches, blocked workers, settled workers without reports, and expired observation leases stop the run. Temporary Agent ID or Herdr lookup failures leave the runtime active and are retried by the normal poll loop until the lease expires. Terminal blocked/failed reports remain terminal on later invocations; they are never retried implicitly.
 
 ## Strict completion contract
 

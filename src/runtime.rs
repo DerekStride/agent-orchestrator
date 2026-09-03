@@ -9,11 +9,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 use crate::{
     herdr::{Worker, WorkerWorkspace},
     identity::Identity,
-    mail::ReportStatus,
+    mail::{ReportStatus, WorkerReport},
     sq::PlanSnapshot,
     worktree::WorktreePlan,
 };
@@ -62,11 +63,13 @@ pub struct RuntimeRecord {
     pub worker_identity: Option<Identity>,
     pub handoff_receipt: Option<String>,
     pub report_message_id: Option<String>,
-    pub report_status: Option<ReportStatus>,
+    pub report: Option<WorkerReport>,
     pub claimed_at_unix: u64,
     pub lease_started_at_unix: Option<u64>,
     pub lease_expires_at_unix: Option<u64>,
     pub heartbeat_at_unix: Option<u64>,
+    #[serde(default)]
+    pub last_observation_error: Option<String>,
 }
 
 impl RuntimeRecord {
@@ -81,11 +84,12 @@ impl RuntimeRecord {
             worker_identity: None,
             handoff_receipt: None,
             report_message_id: None,
-            report_status: None,
+            report: None,
             claimed_at_unix: now,
             lease_started_at_unix: None,
             lease_expires_at_unix: None,
             heartbeat_at_unix: None,
+            last_observation_error: None,
         }
     }
 
@@ -147,7 +151,7 @@ impl RuntimeRecord {
         Ok(())
     }
 
-    pub fn heartbeat(&mut self, now: u64) -> Result<()> {
+    pub fn heartbeat(&mut self, now: u64, lease_seconds: u64) -> Result<()> {
         if self.stage != RuntimeStage::Active {
             return Err(Error::WrongStage {
                 task_id: self.task_id.clone(),
@@ -156,10 +160,18 @@ impl RuntimeRecord {
             });
         }
         self.heartbeat_at_unix = Some(now);
+        self.lease_expires_at_unix = Some(now.saturating_add(lease_seconds));
+        self.last_observation_error = None;
         Ok(())
     }
 
-    pub fn record_report(&mut self, message_id: String, status: ReportStatus) -> Result<()> {
+    pub fn record_observation_failure(&mut self, detail: String) -> Result<()> {
+        self.require_stage(RuntimeStage::Active)?;
+        self.last_observation_error = Some(detail);
+        Ok(())
+    }
+
+    pub fn record_report(&mut self, message_id: String, report: WorkerReport) -> Result<()> {
         self.require_stage(RuntimeStage::Active)?;
         if message_id.trim().is_empty() {
             return Err(Error::HandleMismatch {
@@ -168,21 +180,21 @@ impl RuntimeRecord {
             });
         }
         self.report_message_id = Some(message_id);
-        self.report_status = Some(status);
+        self.report = Some(report);
         self.stage = RuntimeStage::ReportReceived;
         Ok(())
     }
 
     pub fn settle_report(&mut self) -> Result<()> {
         self.require_stage(RuntimeStage::ReportReceived)?;
-        self.stage = match self.report_status {
+        self.stage = match self.report.as_ref().map(|report| &report.status) {
             Some(ReportStatus::Completed) => RuntimeStage::Completed,
             Some(ReportStatus::Blocked) => RuntimeStage::Blocked,
             Some(ReportStatus::Failed) => RuntimeStage::Failed,
             None => {
                 return Err(Error::HandleMismatch {
                     task_id: self.task_id.clone(),
-                    detail: "report status is missing".to_owned(),
+                    detail: "worker report is missing".to_owned(),
                 });
             }
         };
@@ -230,7 +242,7 @@ impl RuntimeRecord {
         Ok(now >= deadline)
     }
 
-    pub fn validate_reconcilable(&self) -> Result<()> {
+    pub fn validate_reconcilable(&self, run_id: &str) -> Result<()> {
         if !self.stage.is_reconcilable() {
             return Err(Error::InterruptedProvisioning {
                 task_id: self.task_id.clone(),
@@ -244,7 +256,18 @@ impl RuntimeRecord {
             _ => None,
         };
         if let Some(expected) = expected_report_status {
-            if self.report_message_id.is_none() || self.report_status.as_ref() != Some(&expected) {
+            let report = self.report.as_ref().ok_or_else(|| Error::HandleMismatch {
+                task_id: self.task_id.clone(),
+                detail: format!(
+                    "{:?} runtime does not retain its matching worker report",
+                    self.stage
+                ),
+            })?;
+            if self.report_message_id.is_none()
+                || report.status != expected
+                || report.task_id != self.task_id
+                || report.run_id != run_id
+            {
                 return Err(Error::HandleMismatch {
                     task_id: self.task_id.clone(),
                     detail: format!(
@@ -252,9 +275,6 @@ impl RuntimeRecord {
                         self.stage
                     ),
                 });
-            }
-            if self.stage == RuntimeStage::Completed {
-                return Ok(());
             }
         }
         self.worker()?;
@@ -269,13 +289,20 @@ impl RuntimeRecord {
                 field: "lease or heartbeat",
             });
         }
-        if self.stage == RuntimeStage::ReportReceived
-            && (self.report_message_id.is_none() || self.report_status.is_none())
-        {
-            return Err(Error::MissingHandle {
+        if self.stage == RuntimeStage::ReportReceived {
+            let report = self.report.as_ref().ok_or_else(|| Error::MissingHandle {
                 task_id: self.task_id.clone(),
                 field: "worker report",
-            });
+            })?;
+            if self.report_message_id.is_none()
+                || report.task_id != self.task_id
+                || report.run_id != run_id
+            {
+                return Err(Error::HandleMismatch {
+                    task_id: self.task_id.clone(),
+                    detail: "received report does not match its runtime".to_owned(),
+                });
+            }
         }
         Ok(())
     }
@@ -314,6 +341,7 @@ pub struct RunLedger {
     pub plan: PlanSnapshot,
     pub orchestrator: Identity,
     pub created_at_unix: u64,
+    pub updated_at_unix: u64,
     pub runtimes: BTreeMap<String, RuntimeRecord>,
 }
 
@@ -338,6 +366,7 @@ impl RunLedger {
             plan,
             orchestrator,
             created_at_unix: now,
+            updated_at_unix: now,
             runtimes: BTreeMap::new(),
         }
     }
@@ -388,7 +417,7 @@ impl RunLedger {
                     detail: "runtime map key and retained task IDs disagree".to_owned(),
                 });
             }
-            runtime.validate_reconcilable()?;
+            runtime.validate_reconcilable(&self.run_id)?;
         }
         Ok(())
     }
@@ -451,7 +480,8 @@ impl LedgerStore {
         }
     }
 
-    pub fn save(&self, ledger: &RunLedger) -> Result<()> {
+    pub fn save(&self, ledger: &mut RunLedger) -> Result<()> {
+        ledger.updated_at_unix = now_unix()?;
         let contents = serde_json::to_vec_pretty(ledger).map_err(Error::SerializeLedger)?;
         let parent = self
             .path
@@ -499,20 +529,8 @@ pub fn now_unix() -> Result<u64> {
         .map_err(Error::Clock)
 }
 
-pub fn new_run_id(root_task_id: &str) -> Result<String> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(Error::Clock)?;
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in root_task_id
-        .bytes()
-        .chain(process::id().to_le_bytes())
-        .chain(duration.as_nanos().to_le_bytes())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    Ok(format!("run-{hash:016x}"))
+pub fn new_run_id(_root_task_id: &str) -> Result<String> {
+    Ok(Ulid::generate().to_string())
 }
 
 fn validate_state_component(value: &str) -> Result<()> {

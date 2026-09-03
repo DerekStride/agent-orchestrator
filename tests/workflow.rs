@@ -207,8 +207,12 @@ fn workflow_claims_hands_off_stacks_and_completes_dependency_branches() {
         .iter()
         .all(|runtime| runtime["stage"] == "completed"));
     let ledger = scenario.ledger();
-    assert_eq!(ledger["runtimes"]["leaf"]["report_status"], "completed");
-    assert_eq!(ledger["runtimes"]["root"]["report_status"], "completed");
+    assert_eq!(ledger["runtimes"]["leaf"]["report"]["status"], "completed");
+    assert_eq!(ledger["runtimes"]["root"]["report"]["status"], "completed");
+    assert_eq!(
+        ledger["runtimes"]["root"]["report"]["evidence"],
+        json!(["fixture scenario: passed"])
+    );
 }
 
 #[test]
@@ -311,9 +315,21 @@ fn workflow_stops_on_blocked_failed_and_lost_workers_without_retry() {
 
     let lost = provisioned_root();
     fs::write(lost.fixture_state.join("identity-missing"), "").unwrap();
+    let transient = success_json(lost.finish());
+    assert_eq!(transient["status"], "active");
+    let mut ledger = lost.ledger();
+    assert!(ledger["runtimes"]["root"]["last_observation_error"]
+        .as_str()
+        .unwrap()
+        .contains("found none"));
+    ledger["runtimes"]["root"]["lease_expires_at_unix"] = json!(0);
+    fs::write(
+        lost.state.join("root.json"),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
     let error = failure(lost.finish());
-    assert!(error.contains("worker for task `root` is lost"));
-    assert!(error.contains("found none"));
+    assert!(error.contains("worker lease for task `root` expired"));
     assert_eq!(lost.ledger()["runtimes"]["root"]["stage"], "active");
 }
 

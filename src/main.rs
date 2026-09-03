@@ -23,7 +23,7 @@ fn finish(args: FinishArgs) -> ExitCode {
             Ok(current_dir) => current_dir,
             Err(error) => {
                 eprintln!("error: cannot determine current directory: {error}");
-                return ExitCode::from(2);
+                return ExitCode::FAILURE;
             }
         },
     };
@@ -38,19 +38,19 @@ fn finish(args: FinishArgs) -> ExitCode {
         lease_seconds: args.lease_seconds,
     };
     match execute(options) {
-        Ok(output) => match serde_json::to_string(&output) {
+        Ok(output) => match serde_json::to_string_pretty(&output) {
             Ok(json) => {
                 println!("{json}");
                 ExitCode::SUCCESS
             }
             Err(error) => {
                 eprintln!("error: cannot serialize finish result: {error}");
-                ExitCode::from(2)
+                ExitCode::FAILURE
             }
         },
         Err(error) => {
             eprintln!("error: {error}");
-            ExitCode::from(2)
+            ExitCode::FAILURE
         }
     }
 }

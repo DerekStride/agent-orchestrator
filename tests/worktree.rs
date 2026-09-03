@@ -93,21 +93,73 @@ fn worktree_uses_unique_descendant_blocker_branch_and_rejects_convergence() {
 }
 
 #[test]
-fn worktree_queue_link_is_absolute_external_and_never_replaced() {
+fn worktree_bases_preclosed_blockers_without_retained_branches_on_head() {
+    let directory = TestDir::new();
+    let repo = directory.path().join("repo");
+    init_repo(&repo);
+    let queue = directory.path().join("issues.jsonl");
+    write_queue(
+        &queue,
+        &[
+            task("legacy", "closed", &[]),
+            task("root", "pending", &["legacy"]),
+        ],
+    );
+    let plan = Queue::read(&queue).unwrap().scope("root").unwrap();
+    let worktree_root = directory.path().join("worktrees");
+    fs::create_dir(&worktree_root).unwrap();
+    let client = GitClient::with_executable(&repo, "git");
+
+    let planned = client.plan_task(&plan, &worktree_root, "root").unwrap();
+
+    assert_eq!(planned.base, git_output(&repo, &["rev-parse", "HEAD"]));
+}
+
+#[test]
+fn worktree_queue_link_is_absolute_external_and_idempotent() {
     let directory = TestDir::new();
     let worktree = directory.path().join("repo.task");
     fs::create_dir(&worktree).unwrap();
     let queue = directory.path().join("issues.jsonl");
     fs::write(&queue, "{}\n").unwrap();
+    let client = GitClient::with_executable(&worktree, "git");
 
-    let link = create_queue_link(&worktree, &queue).unwrap();
+    let link = create_queue_link(&client, &worktree, &queue).unwrap();
     let target = fs::read_link(&link).unwrap();
     assert!(target.is_absolute());
     assert_eq!(target, fs::canonicalize(&queue).unwrap());
     verify_queue_link(&worktree, Some(&queue)).unwrap();
 
-    let error = create_queue_link(&worktree, &queue).unwrap_err();
-    assert!(matches!(error, Error::QueueLinkExists { .. }));
+    assert_eq!(create_queue_link(&client, &worktree, &queue).unwrap(), link);
+}
+
+#[test]
+fn worktree_replaces_a_tracked_queue_copy_without_dirtying_the_index() {
+    let directory = TestDir::new();
+    let repo = directory.path().join("repo");
+    init_repo(&repo);
+    fs::create_dir(repo.join(".sift")).unwrap();
+    fs::write(repo.join(".sift/issues.jsonl"), "checked-out copy\n").unwrap();
+    git(&repo, &["add", "-f", ".sift/issues.jsonl"]);
+    git(&repo, &["commit", "-m", "queue"]);
+    let worktree = directory.path().join("repo.task");
+    let worktree_path = worktree.to_str().unwrap();
+    git(&repo, &["worktree", "add", "-b", "task", worktree_path]);
+    let queue = directory.path().join("issues.jsonl");
+    fs::write(&queue, "canonical queue\n").unwrap();
+    let client = GitClient::with_executable(&repo, "git");
+
+    create_queue_link(&client, &worktree, &queue).unwrap();
+
+    assert_eq!(
+        fs::read_link(worktree.join(".sift/issues.jsonl")).unwrap(),
+        fs::canonicalize(queue).unwrap()
+    );
+    assert!(git_output(
+        &worktree,
+        &["status", "--short", "--", ".sift/issues.jsonl"]
+    )
+    .is_empty());
 }
 
 fn init_repo(repo: &Path) {
@@ -132,6 +184,21 @@ fn git(repo: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_output(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn task(id: &str, status: &str, blocked_by: &[&str]) -> serde_json::Value {

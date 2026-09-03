@@ -51,12 +51,25 @@ pub struct RuntimeSummary {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FinishOutput {
     pub status: FinishStatus,
-    pub run_id: String,
+    pub run_id: Option<String>,
     pub root_task_id: String,
     pub runtimes: Vec<RuntimeSummary>,
 }
 
 pub fn execute(options: FinishOptions) -> Result<FinishOutput> {
+    if options.poll_seconds == 0 {
+        return Err(Error::InvalidOption {
+            option: "--poll-seconds",
+            reason: "must be greater than zero",
+        });
+    }
+    if options.lease_seconds == 0 {
+        return Err(Error::InvalidOption {
+            option: "--lease-seconds",
+            reason: "must be greater than zero",
+        });
+    }
+
     let paths = ResolvedPaths::resolve(&options)?;
     let sq = SqClient::configured(&paths.queue);
 
@@ -97,7 +110,7 @@ pub fn execute(options: FinishOptions) -> Result<FinishOutput> {
         if initial.status(&options.root_task_id).map_err(Error::Sq)? == TaskStatus::Closed {
             return Ok(FinishOutput {
                 status: FinishStatus::Complete,
-                run_id,
+                run_id: None,
                 root_task_id: options.root_task_id,
                 runtimes: Vec::new(),
             });
@@ -124,7 +137,7 @@ pub fn execute(options: FinishOptions) -> Result<FinishOutput> {
             ledger
         }
         None => {
-            let ledger = RunLedger::new(
+            let mut ledger = RunLedger::new(
                 run_id,
                 options.root_task_id.clone(),
                 paths.queue.clone(),
@@ -134,7 +147,7 @@ pub fn execute(options: FinishOptions) -> Result<FinishOutput> {
                 orchestrator,
                 now_unix().map_err(Error::Runtime)?,
             );
-            store.save(&ledger).map_err(Error::Runtime)?;
+            store.save(&mut ledger).map_err(Error::Runtime)?;
             ledger
         }
     };
@@ -179,7 +192,9 @@ fn run_pass(
             .get(&task_id)
             .cloned()
             .expect("retained IDs come from the runtime map");
-        runtime.validate_reconcilable().map_err(Error::Runtime)?;
+        runtime
+            .validate_reconcilable(&ledger.run_id)
+            .map_err(Error::Runtime)?;
         if runtime.stage == RuntimeStage::Completed {
             if plan.status(&task_id).map_err(Error::Sq)? != TaskStatus::Closed {
                 return Err(Error::CompletedRuntimeReopened { task_id });
@@ -187,12 +202,17 @@ fn run_pass(
             continue;
         }
         if matches!(runtime.stage, RuntimeStage::Blocked | RuntimeStage::Failed) {
-            let status = runtime.report_status.clone().ok_or_else(|| {
-                Error::Runtime(crate::runtime::Error::MissingHandle {
-                    task_id: task_id.clone(),
-                    field: "report_status",
-                })
-            })?;
+            let status = runtime
+                .report
+                .as_ref()
+                .ok_or_else(|| {
+                    Error::Runtime(crate::runtime::Error::MissingHandle {
+                        task_id: task_id.clone(),
+                        field: "report",
+                    })
+                })?
+                .status
+                .clone();
             return Err(Error::RetainedTerminalReport { task_id, status });
         }
         if plan.status(&task_id).map_err(Error::Sq)? == TaskStatus::Pending {
@@ -231,7 +251,7 @@ fn run_pass(
                 .map_err(Error::Worktree)?;
             }
             runtime
-                .record_report(message_id, report.status.clone())
+                .record_report(message_id, report.clone())
                 .map_err(Error::Runtime)?;
             ledger.runtimes.insert(task_id.clone(), runtime.clone());
             store.save(ledger).map_err(Error::Runtime)?;
@@ -269,12 +289,20 @@ fn run_pass(
             continue;
         }
 
-        let discovered = identities
-            .discover_worker(&runtime.worktree.path)
-            .map_err(|error| Error::LostWorker {
-                task_id: task_id.clone(),
-                detail: error.to_string(),
-            })?;
+        let now = now_unix().map_err(Error::Runtime)?;
+        let discovered = match identities.discover_worker(&runtime.worktree.path) {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                defer_observation_failure(
+                    store,
+                    ledger,
+                    runtime,
+                    format!("Agent ID lookup failed: {error}"),
+                    now,
+                )?;
+                continue;
+            }
+        };
         let retained_identity = runtime.identity().map_err(Error::Runtime)?;
         if discovered.session_id != retained_identity.session_id
             || discovered.slug != retained_identity.slug
@@ -286,27 +314,26 @@ fn run_pass(
             });
         }
 
-        let worker_status = herdr
-            .status(&runtime.worker().map_err(Error::Runtime)?)
-            .map_err(|error| Error::LostWorker {
-                task_id: task_id.clone(),
-                detail: error.to_string(),
-            })?;
-        let now = now_unix().map_err(Error::Runtime)?;
-        runtime.heartbeat(now).map_err(Error::Runtime)?;
-        ledger.runtimes.insert(task_id.clone(), runtime.clone());
+        let worker_status = match herdr.status(&runtime.worker().map_err(Error::Runtime)?) {
+            Ok(status) => status,
+            Err(error) => {
+                defer_observation_failure(
+                    store,
+                    ledger,
+                    runtime,
+                    format!("Herdr lookup failed: {error}"),
+                    now,
+                )?;
+                continue;
+            }
+        };
+        runtime
+            .heartbeat(now, options.lease_seconds)
+            .map_err(Error::Runtime)?;
+        ledger.runtimes.insert(task_id.clone(), runtime);
         store.save(ledger).map_err(Error::Runtime)?;
         match reconcile_worker(worker_status, false) {
-            WorkerDisposition::Active => {
-                if runtime.lease_expired(now).map_err(Error::Runtime)? {
-                    return Err(Error::LeaseExpired {
-                        task_id,
-                        deadline: runtime
-                            .lease_expires_at_unix
-                            .expect("lease_expired validates the deadline"),
-                    });
-                }
-            }
+            WorkerDisposition::Active => {}
             WorkerDisposition::ReportPresent => {
                 unreachable!("the report scan returned no structured report")
             }
@@ -351,7 +378,7 @@ fn run_pass(
         ledger.runtimes.insert(task_id.clone(), runtime.clone());
         store.save(ledger).map_err(Error::Runtime)?;
 
-        create_queue_link(&runtime.worktree.path, &ledger.queue).map_err(Error::Worktree)?;
+        create_queue_link(git, &runtime.worktree.path, &ledger.queue).map_err(Error::Worktree)?;
         runtime.record_queue_link().map_err(Error::Runtime)?;
         ledger.runtimes.insert(task_id.clone(), runtime.clone());
         store.save(ledger).map_err(Error::Runtime)?;
@@ -453,9 +480,11 @@ fn settle_retained_report(
     mail.mark_read(&message_id).map_err(Error::Mail)?;
     runtime.settle_report().map_err(Error::Runtime)?;
     let status = runtime
-        .report_status
-        .clone()
-        .expect("a report-received runtime retains its report status");
+        .report
+        .as_ref()
+        .expect("a report-received runtime retains its report")
+        .status
+        .clone();
     ledger.runtimes.insert(task_id.clone(), runtime);
     store.save(ledger).map_err(Error::Runtime)?;
     match status {
@@ -515,7 +544,7 @@ fn completion_ready(plan: &ScopedPlan, ledger: &RunLedger) -> Result<bool> {
 fn output(ledger: &RunLedger, status: FinishStatus) -> FinishOutput {
     FinishOutput {
         status,
-        run_id: ledger.run_id.clone(),
+        run_id: Some(ledger.run_id.clone()),
         root_task_id: ledger.root_task_id.clone(),
         runtimes: ledger
             .runtimes
@@ -528,6 +557,30 @@ fn output(ledger: &RunLedger, status: FinishStatus) -> FinishOutput {
                 worker: runtime.worker_name.clone(),
             })
             .collect(),
+    }
+}
+
+fn defer_observation_failure(
+    store: &LedgerStore,
+    ledger: &mut RunLedger,
+    mut runtime: RuntimeRecord,
+    detail: String,
+    now: u64,
+) -> Result<()> {
+    let task_id = runtime.task_id.clone();
+    runtime
+        .record_observation_failure(detail)
+        .map_err(Error::Runtime)?;
+    let expired = runtime.lease_expired(now).map_err(Error::Runtime)?;
+    let deadline = runtime
+        .lease_expires_at_unix
+        .expect("lease_expired validates the deadline");
+    ledger.runtimes.insert(task_id.clone(), runtime);
+    store.save(ledger).map_err(Error::Runtime)?;
+    if expired {
+        Err(Error::LeaseExpired { task_id, deadline })
+    } else {
+        Ok(())
     }
 }
 
@@ -607,6 +660,10 @@ pub enum Error {
     Mail(crate::mail::Error),
     Runtime(crate::runtime::Error),
     Worktree(crate::worktree::Error),
+    InvalidOption {
+        option: &'static str,
+        reason: &'static str,
+    },
     CurrentDirectory(io::Error),
     Canonicalize {
         kind: &'static str,
@@ -634,10 +691,6 @@ pub enum Error {
     },
     RuntimeTaskReset {
         task_id: String,
-    },
-    LostWorker {
-        task_id: String,
-        detail: String,
     },
     ReplacedWorker {
         task_id: String,
@@ -675,6 +728,9 @@ impl fmt::Display for Error {
             Self::Mail(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
             Self::Worktree(error) => error.fmt(formatter),
+            Self::InvalidOption { option, reason } => {
+                write!(formatter, "{option} {reason}")
+            }
             Self::CurrentDirectory(source) => {
                 write!(formatter, "cannot determine current directory: {source}")
             }
@@ -705,9 +761,6 @@ impl fmt::Display for Error {
                 formatter,
                 "retained runtime task `{task_id}` was reset to pending; refusing to retry it"
             ),
-            Self::LostWorker { task_id, detail } => {
-                write!(formatter, "worker for task `{task_id}` is lost: {detail}")
-            }
             Self::ReplacedWorker {
                 task_id,
                 expected,

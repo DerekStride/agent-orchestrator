@@ -82,24 +82,18 @@ impl GitClient {
             return Err(Error::BranchExists { branch });
         }
 
-        let base = match task.blocked_by() {
+        let mut blocker_branches = Vec::with_capacity(task.blocked_by().len());
+        for blocker_id in task.blocked_by() {
+            ensure_closed(scoped, task_id, blocker_id)?;
+            let blocker_branch = branch_name(scoped.root_task_id(), blocker_id)?;
+            if self.branch_exists(&blocker_branch)? {
+                blocker_branches.push(blocker_branch);
+            }
+        }
+        let base = match blocker_branches.as_slice() {
             [] => self.resolve_commit("HEAD")?,
-            [blocker_id] => {
-                ensure_closed(scoped, task_id, blocker_id)?;
-                let blocker_branch = branch_name(scoped.root_task_id(), blocker_id)?;
-                self.require_branch(&blocker_branch)?;
-                blocker_branch
-            }
-            blocker_ids => {
-                let mut blocker_branches = Vec::with_capacity(blocker_ids.len());
-                for blocker_id in blocker_ids {
-                    ensure_closed(scoped, task_id, blocker_id)?;
-                    let blocker_branch = branch_name(scoped.root_task_id(), blocker_id)?;
-                    self.require_branch(&blocker_branch)?;
-                    blocker_branches.push(blocker_branch);
-                }
-                self.unique_descendant(task_id, &blocker_branches)?
-            }
+            [blocker_branch] => blocker_branch.clone(),
+            blocker_branches => self.unique_descendant(task_id, blocker_branches)?,
         };
 
         Ok(WorktreePlan {
@@ -327,7 +321,7 @@ pub fn worktree_path(worktree_root: &Path, repo: &Path, task_id: &str) -> Result
     Ok(worktree_root.join(format!("{repo_name}.{task_id}")))
 }
 
-pub fn create_queue_link(worktree: &Path, queue: &Path) -> Result<PathBuf> {
+pub fn create_queue_link(git: &GitClient, worktree: &Path, queue: &Path) -> Result<PathBuf> {
     let canonical_worktree = fs::canonicalize(worktree).map_err(|source| Error::Canonicalize {
         path: worktree.to_owned(),
         source,
@@ -344,8 +338,42 @@ pub fn create_queue_link(worktree: &Path, queue: &Path) -> Result<PathBuf> {
     }
 
     let link = canonical_worktree.join(QUEUE_LINK);
-    if fs::symlink_metadata(&link).is_ok() {
-        return Err(Error::QueueLinkExists { path: link });
+    if let Ok(metadata) = fs::symlink_metadata(&link) {
+        if metadata.file_type().is_symlink()
+            && fs::read_link(&link).ok().as_ref() == Some(&canonical_queue)
+        {
+            return Ok(link);
+        }
+        let tracked = git.invoke_allow_status(
+            &canonical_worktree,
+            "checking worker queue path",
+            [
+                OsStr::new("ls-files"),
+                OsStr::new("--error-unmatch"),
+                OsStr::new("--"),
+                OsStr::new(QUEUE_LINK),
+            ],
+        )?;
+        match tracked.status.code() {
+            Some(0) => {
+                git.invoke_in(
+                    &canonical_worktree,
+                    "protecting canonical queue link",
+                    [
+                        OsStr::new("update-index"),
+                        OsStr::new("--skip-worktree"),
+                        OsStr::new("--"),
+                        OsStr::new(QUEUE_LINK),
+                    ],
+                )?;
+                fs::remove_file(&link).map_err(|source| Error::RemoveQueueEntry {
+                    path: link.clone(),
+                    source,
+                })?;
+            }
+            Some(1) => return Err(Error::QueueLinkExists { path: link }),
+            _ => return Err(command_failed("checking worker queue path", tracked)),
+        }
     }
     let parent = link.parent().expect("the queue link has a parent");
     fs::create_dir_all(parent).map_err(|source| Error::CreateQueueLinkDirectory {
@@ -544,6 +572,10 @@ pub enum Error {
     QueueLinkExists {
         path: PathBuf,
     },
+    RemoveQueueEntry {
+        path: PathBuf,
+        source: io::Error,
+    },
     CreateQueueLinkDirectory {
         path: PathBuf,
         source: io::Error,
@@ -692,6 +724,11 @@ impl fmt::Display for Error {
                 "refusing to replace existing worker queue path `{}`",
                 path.display()
             ),
+            Self::RemoveQueueEntry { path, source } => write!(
+                formatter,
+                "cannot replace checked-out queue path `{}`: {source}",
+                path.display()
+            ),
             Self::CreateQueueLinkDirectory { path, source } => write!(
                 formatter,
                 "cannot create worker queue directory `{}`: {source}",
@@ -739,6 +776,7 @@ impl std::error::Error for Error {
             Self::Sq(error) => Some(error),
             Self::Start { source, .. }
             | Self::Canonicalize { source, .. }
+            | Self::RemoveQueueEntry { source, .. }
             | Self::CreateQueueLinkDirectory { source, .. }
             | Self::CreateQueueLink { source, .. }
             | Self::ReadQueueLink { source, .. } => Some(source),

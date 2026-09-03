@@ -53,7 +53,7 @@ pub struct FinishArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 5)]
     pub poll_seconds: u64,
 
-    /// Maximum worker lease duration before one-pass diagnosis.
+    /// Seconds without a successful worker observation before its lease expires.
     #[arg(long, value_name = "SECONDS", default_value_t = 900)]
     pub lease_seconds: u64,
 }

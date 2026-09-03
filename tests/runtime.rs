@@ -7,7 +7,8 @@ use std::{
 use agent_orchestrator::{
     herdr::{Worker, WorkerWorkspace},
     identity::Identity,
-    runtime::{Error, LedgerStore, RunLedger, RuntimeRecord, RuntimeStage},
+    mail::{ReportStatus, WorkerReport},
+    runtime::{new_run_id, Error, LedgerStore, RunLedger, RuntimeRecord, RuntimeStage},
     sq::Queue,
     worktree::WorktreePlan,
 };
@@ -93,6 +94,29 @@ fn runtime_ledger_locks_and_persists_every_supervision_handle() {
     assert_eq!(runtime.stage, RuntimeStage::Active);
     assert_eq!(runtime.heartbeat_at_unix, Some(20));
     assert_eq!(runtime.lease_expires_at_unix, Some(920));
+    runtime
+        .record_observation_failure("transient Herdr failure".to_owned())
+        .unwrap();
+    runtime.heartbeat(100, 900).unwrap();
+    assert_eq!(runtime.heartbeat_at_unix, Some(100));
+    assert_eq!(runtime.lease_expires_at_unix, Some(1000));
+    assert_eq!(runtime.last_observation_error, None);
+
+    let report = WorkerReport {
+        task_id: "root".to_owned(),
+        run_id: "run-1".to_owned(),
+        status: ReportStatus::Completed,
+        commit: Some("commit-1".to_owned()),
+        artifact: None,
+        evidence: vec!["cargo test: passed".to_owned()],
+        summary: None,
+    };
+    runtime
+        .record_report("report-1".to_owned(), report.clone())
+        .unwrap();
+    assert_eq!(runtime.report, Some(report));
+    runtime.settle_report().unwrap();
+    assert_eq!(runtime.stage, RuntimeStage::Completed);
 
     let mut ledger = RunLedger::new(
         "run-1".to_owned(),
@@ -110,7 +134,7 @@ fn runtime_ledger_locks_and_persists_every_supervision_handle() {
     let store = LedgerStore::acquire(&state, "root").unwrap();
     let error = LedgerStore::acquire(&state, "root").unwrap_err();
     assert!(matches!(error, Error::LockBusy { .. }));
-    store.save(&ledger).unwrap();
+    store.save(&mut ledger).unwrap();
     let loaded = store.load().unwrap().unwrap();
     assert_eq!(loaded, ledger);
     loaded
@@ -121,6 +145,13 @@ fn runtime_ledger_locks_and_persists_every_supervision_handle() {
             &fs::canonicalize(worktree_root).unwrap(),
         )
         .unwrap();
+}
+
+#[test]
+fn run_ids_are_standard_ulids() {
+    let run_id = new_run_id("root").unwrap();
+    assert_eq!(run_id.len(), 26);
+    assert!(ulid::Ulid::from_string(&run_id).is_ok());
 }
 
 fn identity(cwd: &Path) -> Identity {

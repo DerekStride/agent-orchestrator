@@ -68,6 +68,21 @@ fn finish_closed_root_is_complete_without_runtime_integrations() {
     assert_eq!(result["status"], "complete");
     assert_eq!(result["root_task_id"], "root");
     assert_eq!(result["runtimes"], json!([]));
+    assert!(result["run_id"].is_null());
+}
+
+#[test]
+fn finish_rejects_zero_poll_and_lease_intervals_as_operational_errors() {
+    for option in ["--poll-seconds", "--lease-seconds"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-orchestrator"))
+            .args(["finish", "root", option, "0"])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("{option} must be greater than zero")));
+    }
 }
 
 #[test]

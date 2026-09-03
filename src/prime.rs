@@ -8,7 +8,7 @@ pub const MANUAL: &str = r#"# agent-orchestrator
 2. Record ownership, dependencies, and task state in SQ before dispatch. Each worker updates only its assigned task; ownership or dependency changes return to the orchestrator for a decision.
 3. Give every worker a dedicated worktree, branch, starting reference, queue path, acceptance criteria, and validation commands. Never merge branches or delete worktrees as an implicit side effect of finishing a task.
 4. Keep orchestration state under `--state-dir`; place worktrees under `--worktree-root`. `--queue` and `--repo` select the canonical queue and repository explicitly.
-5. Poll at `--poll-seconds`, bound a worker attempt with `--lease-seconds`, or use `--once` for one dispatch/diagnosis pass.
+5. Poll at `--poll-seconds`, expire a worker after `--lease-seconds` without a successful observation, or use `--once` for one dispatch/diagnosis pass.
 
 ## External integrations
 
