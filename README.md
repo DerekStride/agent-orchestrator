@@ -58,6 +58,8 @@ The default state directory is `<repo-parent>/.agent-orchestrator/<repository-na
 
 A retained ledger must match the requested root, queue, repository, worktree root, orchestrator identity, and current SQ plan. Runtime-only SQ changes—status, timestamps, and matching run ownership—do not count as plan drift. Interrupted provisioning, reset/reopened tasks, replaced identities, missing worktrees, wrong branches, blocked workers, settled workers without reports, and expired observation leases stop the run. Temporary Agent ID or Herdr lookup failures leave the runtime active and are retried by the normal poll loop until the lease expires. Terminal blocked/failed reports remain terminal on later invocations; they are never retried implicitly.
 
+If Herdr starts a worker before Agent ID publishes that worker's identity, the runtime remains at `worker_started` and retries only the read-only identity lookup. It reuses the same retained worker and expires against the normal lease window; it never launches a replacement.
+
 ## Strict completion contract
 
 Before closing its SQ task, a worker must produce and validate its reported commit or durable artifact. It then updates only its assigned SQ task and sends a JSON-only AgentMail report to the handoff's orchestrator with subject:

@@ -15,7 +15,7 @@ pub const MANUAL: &str = r#"# agent-orchestrator
 - SQ stores durable task state and dependency readiness.
 - Git stores branches, commits, and worktrees containing the deliverable.
 - Herdr starts and observes worker sessions.
-- Agent ID provides stable orchestrator and worker identities.
+- Agent ID provides stable orchestrator and worker identities. A newly started worker may remain at `worker_started` while its identity registration appears; reconciliation reuses that worker rather than replacing it.
 - AgentMail carries handoffs, evidence, decisions, blockers, and terminal reports.
 
 `prime`, top-level help, and `finish --help` are static. They do not invoke or discover Herdr, `agent-id`, `agent-mail`, `sq`, or `git`.

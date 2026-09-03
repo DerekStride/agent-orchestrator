@@ -11,7 +11,7 @@ use crate::{
     herdr::{
         reconcile_worker, AgentStatus, HerdrClient, WorkerDisposition, WorkerStop, WorktreeSpec,
     },
-    identity::AgentIdClient,
+    identity::{AgentIdClient, Identity},
     mail::{AgentMailClient, Handoff, ReportDisposition, ReportStatus},
     runtime::{new_run_id, now_unix, LedgerStore, RunLedger, RuntimeRecord, RuntimeStage},
     sq::{resolve_queue_path, ScopedPlan, SqClient, TaskStatus},
@@ -193,6 +193,33 @@ fn run_pass(
             .get(&task_id)
             .cloned()
             .expect("retained IDs come from the runtime map");
+        if runtime.stage == RuntimeStage::WorkerStarted {
+            if plan.status(&task_id).map_err(Error::Sq)? == TaskStatus::Pending {
+                return Err(Error::RuntimeTaskReset { task_id });
+            }
+            git.verify_retained(&runtime.worktree)
+                .map_err(Error::Worktree)?;
+            verify_queue_link(&runtime.worktree.path, Some(&ledger.queue))
+                .map_err(Error::Worktree)?;
+            let now = now_unix().map_err(Error::Runtime)?;
+            match identities.discover_worker(&runtime.worktree.path) {
+                Ok(identity) => complete_worker_startup(
+                    options, store, herdr, mail, &plan, ledger, runtime, identity,
+                )?,
+                Err(error) => {
+                    defer_startup_observation_failure(
+                        options,
+                        store,
+                        ledger,
+                        runtime,
+                        format!("Agent ID lookup failed: {error}"),
+                        now,
+                    )?;
+                    reconciliation_deferred = true;
+                }
+            }
+            continue;
+        }
         runtime
             .validate_reconcilable(&ledger.run_id)
             .map_err(Error::Runtime)?;
@@ -410,49 +437,30 @@ fn run_pass(
         ledger.runtimes.insert(task_id.clone(), runtime.clone());
         store.save(ledger).map_err(Error::Runtime)?;
 
-        let worker_identity = identities
-            .discover_worker(&runtime.worktree.path)
-            .map_err(Error::Identity)?;
-        runtime
-            .record_identity(worker_identity)
-            .map_err(Error::Runtime)?;
-        ledger.runtimes.insert(task_id.clone(), runtime.clone());
-        store.save(ledger).map_err(Error::Runtime)?;
-
-        let handoff = Handoff {
-            run_id: &ledger.run_id,
-            task_id: &task_id,
-            title: task.title(),
-            description: task.description(),
-            queue: &ledger.queue,
-            worktree: &runtime.worktree.path,
-            branch: &runtime.worktree.branch,
-            dependencies: task.blocked_by(),
-            acceptance_criteria: task.acceptance_criteria(),
-            validation_checks: task.validation_checks(),
-            orchestrator: &ledger.orchestrator,
-            worker: runtime.identity().map_err(Error::Runtime)?,
+        let worker_identity = match identities.discover_worker(&runtime.worktree.path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                defer_startup_observation_failure(
+                    options,
+                    store,
+                    ledger,
+                    runtime,
+                    format!("Agent ID lookup failed: {error}"),
+                    now_unix().map_err(Error::Runtime)?,
+                )?;
+                return Ok(FinishStatus::Active);
+            }
         };
-        let receipt = mail.send_handoff(&handoff).map_err(Error::Mail)?;
-        runtime
-            .record_handoff(receipt.id.clone())
-            .map_err(Error::Runtime)?;
-        ledger.runtimes.insert(task_id.clone(), runtime.clone());
-        store.save(ledger).map_err(Error::Runtime)?;
-
-        let prompt = format!(
-            "Read AgentMail message {} from {} and execute that handoff. Report results only through AgentMail as the handoff specifies.",
-            receipt.id, ledger.orchestrator.slug
-        );
-        herdr
-            .prompt_after_handoff(&worker, &receipt.id, &prompt)
-            .map_err(Error::Herdr)?;
-        let activated_at = now_unix().map_err(Error::Runtime)?;
-        runtime
-            .activate(activated_at, options.lease_seconds)
-            .map_err(Error::Runtime)?;
-        ledger.runtimes.insert(task_id.clone(), runtime.clone());
-        store.save(ledger).map_err(Error::Runtime)?;
+        complete_worker_startup(
+            options,
+            store,
+            herdr,
+            mail,
+            &plan,
+            ledger,
+            runtime,
+            worker_identity,
+        )?;
     }
 
     let current = sq
@@ -463,6 +471,62 @@ fn run_pass(
     } else {
         Ok(FinishStatus::Active)
     }
+}
+
+fn complete_worker_startup(
+    options: &FinishOptions,
+    store: &LedgerStore,
+    herdr: &HerdrClient,
+    mail: &AgentMailClient,
+    plan: &ScopedPlan,
+    ledger: &mut RunLedger,
+    mut runtime: RuntimeRecord,
+    worker_identity: Identity,
+) -> Result<()> {
+    let task_id = runtime.task_id.clone();
+    let worker = runtime.worker().map_err(Error::Runtime)?;
+    runtime
+        .record_identity(worker_identity)
+        .map_err(Error::Runtime)?;
+    ledger.runtimes.insert(task_id.clone(), runtime.clone());
+    store.save(ledger).map_err(Error::Runtime)?;
+
+    let task = plan
+        .task(&task_id)
+        .expect("a started worker remains in the scoped plan");
+    let handoff = Handoff {
+        run_id: &ledger.run_id,
+        task_id: &task_id,
+        title: task.title(),
+        description: task.description(),
+        queue: &ledger.queue,
+        worktree: &runtime.worktree.path,
+        branch: &runtime.worktree.branch,
+        dependencies: task.blocked_by(),
+        acceptance_criteria: task.acceptance_criteria(),
+        validation_checks: task.validation_checks(),
+        orchestrator: &ledger.orchestrator,
+        worker: runtime.identity().map_err(Error::Runtime)?,
+    };
+    let receipt = mail.send_handoff(&handoff).map_err(Error::Mail)?;
+    runtime
+        .record_handoff(receipt.id.clone())
+        .map_err(Error::Runtime)?;
+    ledger.runtimes.insert(task_id, runtime.clone());
+    store.save(ledger).map_err(Error::Runtime)?;
+
+    let prompt = format!(
+        "Read AgentMail message {} from {} and execute that handoff. Report results only through AgentMail as the handoff specifies.",
+        receipt.id, ledger.orchestrator.slug
+    );
+    herdr
+        .prompt_after_handoff(&worker, &receipt.id, &prompt)
+        .map_err(Error::Herdr)?;
+    runtime
+        .activate(now_unix().map_err(Error::Runtime)?, options.lease_seconds)
+        .map_err(Error::Runtime)?;
+    ledger.runtimes.insert(runtime.task_id.clone(), runtime);
+    store.save(ledger).map_err(Error::Runtime)
 }
 
 fn settle_retained_report(
@@ -585,6 +649,30 @@ fn defer_observation_failure(
     }
 }
 
+fn defer_startup_observation_failure(
+    options: &FinishOptions,
+    store: &LedgerStore,
+    ledger: &mut RunLedger,
+    mut runtime: RuntimeRecord,
+    detail: String,
+    now: u64,
+) -> Result<()> {
+    let task_id = runtime.task_id.clone();
+    let deadline = runtime
+        .claimed_at_unix
+        .saturating_add(options.lease_seconds);
+    runtime
+        .record_startup_observation_failure(detail)
+        .map_err(Error::Runtime)?;
+    ledger.runtimes.insert(task_id.clone(), runtime);
+    store.save(ledger).map_err(Error::Runtime)?;
+    if now >= deadline {
+        Err(Error::StartupLeaseExpired { task_id, deadline })
+    } else {
+        Ok(())
+    }
+}
+
 fn worker_stop_error(task_id: String, reason: WorkerStop) -> Error {
     match reason {
         WorkerStop::SettledWithoutReport(status) => Error::SettledWithoutReport { task_id, status },
@@ -702,6 +790,10 @@ pub enum Error {
         task_id: String,
         deadline: u64,
     },
+    StartupLeaseExpired {
+        task_id: String,
+        deadline: u64,
+    },
     SettledWithoutReport {
         task_id: String,
         status: AgentStatus,
@@ -773,6 +865,10 @@ impl fmt::Display for Error {
             Self::LeaseExpired { task_id, deadline } => write!(
                 formatter,
                 "worker lease for task `{task_id}` expired at Unix time {deadline}"
+            ),
+            Self::StartupLeaseExpired { task_id, deadline } => write!(
+                formatter,
+                "worker identity registration for task `{task_id}` did not appear before Unix time {deadline}"
             ),
             Self::SettledWithoutReport { task_id, status } => write!(
                 formatter,

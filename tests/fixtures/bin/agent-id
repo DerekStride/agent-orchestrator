@@ -14,6 +14,11 @@ case "${1-}" in
       printf '%s\n' '[]'
       exit 0
     fi
+    if [ -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/startup-identity-missing-once" ]; then
+      rm "$AGENT_ORCHESTRATOR_FIXTURE_STATE/startup-identity-missing-once"
+      printf '%s\n' '[]'
+      exit 0
+    fi
     first=true
     printf '['
     for worktree in "$AGENT_ORCHESTRATOR_FIXTURE_WORKTREES"/repo.*; do

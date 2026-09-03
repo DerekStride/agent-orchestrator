@@ -171,6 +171,12 @@ impl RuntimeRecord {
         Ok(())
     }
 
+    pub fn record_startup_observation_failure(&mut self, detail: String) -> Result<()> {
+        self.require_stage(RuntimeStage::WorkerStarted)?;
+        self.last_observation_error = Some(detail);
+        Ok(())
+    }
+
     pub fn record_report(&mut self, message_id: String, report: WorkerReport) -> Result<()> {
         self.require_stage(RuntimeStage::Active)?;
         if message_id.trim().is_empty() {
@@ -240,6 +246,25 @@ impl RuntimeRecord {
                 field: "lease_expires_at_unix",
             })?;
         Ok(now >= deadline)
+    }
+
+    pub fn validate_resumable_startup(&self) -> Result<()> {
+        self.require_stage(RuntimeStage::WorkerStarted)?;
+        self.worker()?;
+        if self.worker_identity.is_some()
+            || self.handoff_receipt.is_some()
+            || self.report_message_id.is_some()
+            || self.report.is_some()
+            || self.lease_started_at_unix.is_some()
+            || self.lease_expires_at_unix.is_some()
+            || self.heartbeat_at_unix.is_some()
+        {
+            return Err(Error::HandleMismatch {
+                task_id: self.task_id.clone(),
+                detail: "worker_started runtime contains post-identification handles".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     pub fn validate_reconcilable(&self, run_id: &str) -> Result<()> {
@@ -417,7 +442,11 @@ impl RunLedger {
                     detail: "runtime map key and retained task IDs disagree".to_owned(),
                 });
             }
-            runtime.validate_reconcilable(&self.run_id)?;
+            if runtime.stage == RuntimeStage::WorkerStarted {
+                runtime.validate_resumable_startup()?;
+            } else {
+                runtime.validate_reconcilable(&self.run_id)?;
+            }
         }
         Ok(())
     }

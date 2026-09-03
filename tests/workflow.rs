@@ -119,6 +119,67 @@ impl Drop for Scenario {
 }
 
 #[test]
+fn delayed_worker_identity_resumes_the_same_started_worker() {
+    let root = task("root", "pending", &[]);
+    let scenario = Scenario::new(std::slice::from_ref(&root));
+    scenario.write_claim_template("root", vec![root]);
+    fs::write(
+        scenario.fixture_state.join("startup-identity-missing-once"),
+        "",
+    )
+    .unwrap();
+
+    let waiting = success_json(scenario.finish());
+    assert_eq!(waiting["status"], "active");
+    assert_eq!(waiting["runtimes"][0]["stage"], "worker_started");
+    let retained = scenario.ledger()["runtimes"]["root"].clone();
+    assert!(retained["worker_name"].as_str().is_some());
+    assert!(retained["worker_identity"].is_null());
+    assert!(retained["handoff_receipt"].is_null());
+    assert!(retained["last_observation_error"]
+        .as_str()
+        .unwrap()
+        .contains("found none"));
+
+    let resumed = success_json(scenario.finish());
+    assert_eq!(resumed["status"], "active");
+    assert_eq!(resumed["runtimes"][0]["stage"], "active");
+    let active = &scenario.ledger()["runtimes"]["root"];
+    assert_eq!(active["worker_name"], retained["worker_name"]);
+    assert!(active["worker_identity"].is_object());
+    assert!(active["handoff_receipt"].as_str().is_some());
+}
+
+#[test]
+fn delayed_worker_identity_expires_without_replacement() {
+    let root = task("root", "pending", &[]);
+    let scenario = Scenario::new(std::slice::from_ref(&root));
+    scenario.write_claim_template("root", vec![root]);
+    fs::write(
+        scenario.fixture_state.join("startup-identity-missing-once"),
+        "",
+    )
+    .unwrap();
+
+    let waiting = success_json(scenario.finish());
+    let worker_name = waiting["runtimes"][0]["worker"].clone();
+    let mut ledger = scenario.ledger();
+    ledger["runtimes"]["root"]["claimed_at_unix"] = json!(0);
+    fs::write(
+        scenario.state.join("root.json"),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+    fs::write(scenario.fixture_state.join("identity-missing"), "").unwrap();
+
+    let error = failure(scenario.finish());
+    assert!(error.contains("worker identity registration for task `root` did not appear"));
+    let retained = scenario.ledger();
+    assert_eq!(retained["runtimes"]["root"]["stage"], "worker_started");
+    assert_eq!(retained["runtimes"]["root"]["worker_name"], worker_name);
+}
+
+#[test]
 fn workflow_claims_hands_off_stacks_and_completes_dependency_branches() {
     let leaf = task("leaf", "pending", &[]);
     let root = task("root", "pending", &["leaf"]);
