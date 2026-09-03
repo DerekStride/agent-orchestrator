@@ -33,6 +33,7 @@ fn finish(args: FinishArgs) -> ExitCode {
         repo,
         state_dir: args.state_dir,
         worktree_root: args.worktree_root,
+        model: args.model,
         once: args.once,
         poll_seconds: args.poll_seconds,
         lease_seconds: args.lease_seconds,

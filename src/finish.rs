@@ -27,6 +27,7 @@ pub struct FinishOptions {
     pub repo: PathBuf,
     pub state_dir: Option<PathBuf>,
     pub worktree_root: Option<PathBuf>,
+    pub model: Option<String>,
     pub once: bool,
     pub poll_seconds: u64,
     pub lease_seconds: u64,
@@ -431,7 +432,12 @@ fn run_pass(
         store.save(ledger).map_err(Error::Runtime)?;
 
         let worker = herdr
-            .start_omp(&workspace, &ledger.run_id, &task_id)
+            .start_omp(
+                &workspace,
+                &ledger.run_id,
+                &task_id,
+                options.model.as_deref(),
+            )
             .map_err(Error::Herdr)?;
         runtime.record_worker(&worker).map_err(Error::Runtime)?;
         ledger.runtimes.insert(task_id.clone(), runtime.clone());

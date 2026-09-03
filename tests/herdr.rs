@@ -195,7 +195,7 @@ fn herdr_starts_named_omp_and_prompts_only_with_handoff_receipt() {
         pane_id: "w7:p9".to_owned(),
     };
     let worker = client
-        .start_omp(&workspace, "run-123", "Task/With Spaces")
+        .start_omp(&workspace, "run-123", "Task/With Spaces", Some("@smol"))
         .unwrap();
     assert_eq!(worker.name, worker_name("run-123", "Task/With Spaces"));
     assert!(worker.name.len() <= 32);
@@ -203,7 +203,17 @@ fn herdr_starts_named_omp_and_prompts_only_with_handoff_receipt() {
     let start_arguments = read_arguments(&arguments);
     assert_eq!(
         &start_arguments[3..],
-        ["start", &worker.name, "--kind", "omp", "--pane", "w7:p9"]
+        [
+            "start",
+            &worker.name,
+            "--kind",
+            "omp",
+            "--pane",
+            "w7:p9",
+            "--",
+            "--model",
+            "@smol"
+        ]
     );
 
     fs::remove_file(&arguments).unwrap();

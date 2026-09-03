@@ -47,10 +47,12 @@ agent-orchestrator finish ROOT_TASK_ID \
   --queue /absolute/path/issues.jsonl \
   --repo /absolute/path/repository \
   --state-dir /absolute/path/orchestrator-state \
-  --worktree-root /absolute/path/worktrees
+  --worktree-root /absolute/path/worktrees \
+  --model @smol
 ```
 
 `ROOT_TASK_ID` is required. The run contains only that task and its transitive `blocked_by` dependencies; unrelated queue items are never claimed. The orchestrator rejects missing tasks, missing blockers, duplicate IDs, dependency cycles, plan drift, foreign run ownership, and unowned `in_progress` work before dispatching more work.
+`--model` forwards the selected OMP role or model to every worker at launch; for example, `--model @smol` starts each worker with OMP's `@smol` role.
 
 `--once` performs one reconciliation/dispatch pass and returns `active` or `complete`. Without it, the command polls every `--poll-seconds` (default `5`). `--lease-seconds` is an inactivity lease (default `900`): each successful Agent ID and Herdr observation renews it; transient observation failures remain recorded and become terminal only after the lease expires.
 

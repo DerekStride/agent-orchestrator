@@ -32,6 +32,9 @@ pub struct FinishArgs {
     /// Canonical SQ JSONL queue shared by the orchestrator and workers.
     #[arg(long, env = "SQ_QUEUE_PATH", value_name = "PATH")]
     pub queue: Option<PathBuf>,
+    /// OMP role or model passed to every worker at launch.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
 
     /// Git repository containing the root task's work.
     #[arg(long, value_name = "PATH")]

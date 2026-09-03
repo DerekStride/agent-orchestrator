@@ -208,12 +208,16 @@ impl HerdrClient {
         workspace: &WorkerWorkspace,
         run_id: &str,
         task_id: &str,
+        model: Option<&str>,
     ) -> Result<Worker> {
         let name = worker_name(run_id, task_id);
         let response = self.invoke_json("starting OMP worker", |command| {
             command
                 .args(["agent", "start", &name, "--kind", "omp", "--pane"])
                 .arg(&workspace.pane_id);
+            if let Some(model) = model {
+                command.args(["--", "--model", model]);
+            }
         })?;
         let agent = parse_agent(&response, "starting OMP worker", "agent_started")?;
         validate_agent(

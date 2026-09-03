@@ -128,11 +128,28 @@ fn finish_once_provisions_and_persists_a_complete_active_runtime() {
     let worktrees = directory.path().join("worktrees");
     fs::create_dir(&worktrees).unwrap();
     let worktree = worktrees.join("repo.root");
+    let start_arguments = directory.path().join("start-arguments");
 
     let herdr = directory.path().join("fake-herdr");
+    let herdr_script = r#"#!/bin/sh
+set -eu
+if [ "$3" = status ]; then
+  printf '%s\n' '{"running":true,"compatible":true}'
+elif [ "$3" = worktree ]; then
+  git -C "$6" worktree add -b "$8" "${12}" "${10}" >/dev/null 2>&1
+  printf '%s\n' '{"result":{"type":"worktree_created","workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}'
+elif [ "$3" = agent ]; then
+  case "$4" in
+    start) printf '%s\n' "$@" > START_ARGUMENTS; kind=agent_started; status=idle ;;
+    prompt) kind=agent_prompted; status=idle ;;
+    get) kind=agent_info; status=working ;;
+  esac
+  printf '{"result":{"type":"%s","agent":{"name":"%s","workspace_id":"w1","pane_id":"w1:p1","agent_status":"%s"}}}\n' "$kind" "$5" "$status"
+fi
+"#;
     write_executable(
         &herdr,
-        "#!/bin/sh\nset -eu\nif [ \"$3\" = status ]; then\n  printf '%s\\n' '{\"running\":true,\"compatible\":true}'\nelif [ \"$3\" = worktree ]; then\n  git -C \"$6\" worktree add -b \"$8\" \"${12}\" \"${10}\" >/dev/null 2>&1\n  printf '%s\\n' '{\"result\":{\"type\":\"worktree_created\",\"workspace\":{\"workspace_id\":\"w1\"},\"root_pane\":{\"pane_id\":\"w1:p1\"}}}'\nelif [ \"$3\" = agent ]; then\n  case \"$4\" in\n    start) kind=agent_started; status=idle ;;\n    prompt) kind=agent_prompted; status=idle ;;\n    get) kind=agent_info; status=working ;;\n  esac\n  printf '{\"result\":{\"type\":\"%s\",\"agent\":{\"name\":\"%s\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$kind\" \"$5\" \"$status\"\nfi\n",
+        &herdr_script.replace("START_ARGUMENTS", &shell_quote(&start_arguments)),
     );
 
     let agent_id = directory.path().join("fake-agent-id");
@@ -180,6 +197,7 @@ fn finish_once_provisions_and_persists_a_complete_active_runtime() {
             .env("AGENT_ORCHESTRATOR_AGENT_ID", &agent_id)
             .env("AGENT_ORCHESTRATOR_AGENT_MAIL", &agent_mail)
             .env("HERDR_SESSION", "finish-test")
+            .args(["--model", "@smol"])
             .output()
             .unwrap()
     };
@@ -190,6 +208,8 @@ fn finish_once_provisions_and_persists_a_complete_active_runtime() {
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let start_arguments = fs::read_to_string(&start_arguments).unwrap();
+    assert!(start_arguments.ends_with("--\n--model\n@smol\n"));
     assert_eq!(result["status"], "active");
     assert_eq!(result["runtimes"][0]["task_id"], "root");
     assert_eq!(result["runtimes"][0]["stage"], "active");
