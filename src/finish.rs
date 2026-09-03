@@ -424,7 +424,7 @@ fn run_pass(
             "Read AgentMail message {} from {} and execute that handoff. Report results only through AgentMail as the handoff specifies.",
             receipt.id, ledger.orchestrator.slug
         );
-        let status = herdr
+        herdr
             .prompt_after_handoff(&worker, &receipt.id, &prompt)
             .map_err(Error::Herdr)?;
         let activated_at = now_unix().map_err(Error::Runtime)?;
@@ -433,27 +433,6 @@ fn run_pass(
             .map_err(Error::Runtime)?;
         ledger.runtimes.insert(task_id.clone(), runtime.clone());
         store.save(ledger).map_err(Error::Runtime)?;
-        match reconcile_worker(status, false) {
-            WorkerDisposition::Active => {
-                if runtime
-                    .lease_expired(activated_at)
-                    .map_err(Error::Runtime)?
-                {
-                    return Err(Error::LeaseExpired {
-                        task_id,
-                        deadline: runtime
-                            .lease_expires_at_unix
-                            .expect("lease_expired validates the deadline"),
-                    });
-                }
-            }
-            WorkerDisposition::ReportPresent => {
-                unreachable!("a newly prompted worker has no scanned report")
-            }
-            WorkerDisposition::Stop(reason) => {
-                return Err(worker_stop_error(task_id, reason));
-            }
-        }
     }
 
     let current = sq

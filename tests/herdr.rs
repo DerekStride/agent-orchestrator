@@ -218,12 +218,9 @@ fn herdr_starts_named_omp_and_prompts_only_with_handoff_receipt() {
         "a missing receipt must prevent prompting"
     );
 
-    assert_eq!(
-        client
-            .prompt_after_handoff(&worker, "01MESSAGE", "Execute the handoff")
-            .unwrap(),
-        AgentStatus::Working
-    );
+    client
+        .prompt_after_handoff(&worker, "01MESSAGE", "Execute the handoff")
+        .unwrap();
     assert_eq!(client.status(&worker).unwrap(), AgentStatus::Unknown);
 }
 

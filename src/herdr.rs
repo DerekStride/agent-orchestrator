@@ -236,7 +236,7 @@ impl HerdrClient {
         worker: &Worker,
         handoff_receipt: &str,
         prompt: &str,
-    ) -> Result<AgentStatus> {
+    ) -> Result<()> {
         if handoff_receipt.trim().is_empty() {
             return Err(Error::MissingHandoffReceipt);
         }
@@ -252,7 +252,7 @@ impl HerdrClient {
             &worker.pane_id,
             "prompting OMP worker",
         )?;
-        Ok(agent.agent_status)
+        Ok(())
     }
 
     pub fn status(&self, worker: &Worker) -> Result<AgentStatus> {

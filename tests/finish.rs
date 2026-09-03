@@ -132,7 +132,7 @@ fn finish_once_provisions_and_persists_a_complete_active_runtime() {
     let herdr = directory.path().join("fake-herdr");
     write_executable(
         &herdr,
-        "#!/bin/sh\nset -eu\nif [ \"$3\" = status ]; then\n  printf '%s\\n' '{\"running\":true,\"compatible\":true}'\nelif [ \"$3\" = worktree ]; then\n  git -C \"$6\" worktree add -b \"$8\" \"${12}\" \"${10}\" >/dev/null 2>&1\n  printf '%s\\n' '{\"result\":{\"type\":\"worktree_created\",\"workspace\":{\"workspace_id\":\"w1\"},\"root_pane\":{\"pane_id\":\"w1:p1\"}}}'\nelif [ \"$3\" = agent ]; then\n  case \"$4\" in\n    start) kind=agent_started; status=idle ;;\n    prompt) kind=agent_prompted; status=working ;;\n    get) kind=agent_info; status=working ;;\n  esac\n  printf '{\"result\":{\"type\":\"%s\",\"agent\":{\"name\":\"%s\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$kind\" \"$5\" \"$status\"\nfi\n",
+        "#!/bin/sh\nset -eu\nif [ \"$3\" = status ]; then\n  printf '%s\\n' '{\"running\":true,\"compatible\":true}'\nelif [ \"$3\" = worktree ]; then\n  git -C \"$6\" worktree add -b \"$8\" \"${12}\" \"${10}\" >/dev/null 2>&1\n  printf '%s\\n' '{\"result\":{\"type\":\"worktree_created\",\"workspace\":{\"workspace_id\":\"w1\"},\"root_pane\":{\"pane_id\":\"w1:p1\"}}}'\nelif [ \"$3\" = agent ]; then\n  case \"$4\" in\n    start) kind=agent_started; status=idle ;;\n    prompt) kind=agent_prompted; status=idle ;;\n    get) kind=agent_info; status=working ;;\n  esac\n  printf '{\"result\":{\"type\":\"%s\",\"agent\":{\"name\":\"%s\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$kind\" \"$5\" \"$status\"\nfi\n",
     );
 
     let agent_id = directory.path().join("fake-agent-id");
