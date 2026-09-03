@@ -374,7 +374,7 @@ fn validated_report_closes_the_run_and_unlocks_the_dependent_task() {
     fs::write(
         fixture.state.join("report-header.json"),
         format!(
-            r#"[{{"mailbox":"inbox","id":"MSG-REPORT","sender":"worker","subject":"agent-orchestrator report child {run_id}"}}]"#
+            r#"[{{"mailbox":"inbox","id":"MSG-REPORT","sender":"Worker worker","subject":"agent-orchestrator report child {run_id}"}}]"#
         ),
     )
     .unwrap();

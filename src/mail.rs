@@ -189,7 +189,10 @@ impl AgentMail {
         let expected_subject = report_subject(task_id, run_id);
         let matching = headers
             .into_iter()
-            .filter(|header| header.sender == worker.slug && header.subject == expected_subject)
+            .filter(|header| {
+                (header.sender == worker.slug || header.sender == worker.name)
+                    && header.subject == expected_subject
+            })
             .collect::<Vec<_>>();
 
         match matching.as_slice() {
