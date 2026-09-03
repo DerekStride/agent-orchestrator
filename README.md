@@ -1,3 +1,5 @@
+<img width="1408" height="768" alt="shopp-e-b62bff98-f5e0-4254-800e-c0c516f97fa7-i-need-a-mascot-for-this-project-and-i-want-it-to" src="https://github.com/user-attachments/assets/2af394d7-9032-42cf-89e6-bd223c6111db" />
+
 # agent-orchestrator
 
 `agent-orchestrator` drives one dependency-scoped SQ task graph through dedicated Git worktrees and OMP worker sessions. SQ remains the task source of truth; a durable local ledger correlates Git, Herdr, Agent ID, and AgentMail state without merging branches, deleting worktrees, or silently retrying failed work.
