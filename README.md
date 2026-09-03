@@ -14,12 +14,6 @@ Requirements: the local `sq`, `git`, `herdr`, `agent-id`, and `agent-mail` CLIs 
 brew install derekstride/tap/agent-orchestrator
 ```
 
-### Cargo
-
-```sh
-cargo install agent-orchestrator
-```
-
 ### Source
 
 ```sh
