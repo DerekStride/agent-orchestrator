@@ -53,6 +53,8 @@ fn mail_handoff_contains_every_execution_and_ownership_boundary() {
     let handoff = Handoff {
         run_id: "run-1",
         task_id: "task-1",
+        title: "Implement task one",
+        description: "Build the first task without changing unrelated work.",
         queue: Path::new("/repo/issues.jsonl"),
         worktree: Path::new("/repo.task"),
         branch: "agent-orchestrator/root/task-1",
@@ -69,6 +71,8 @@ fn mail_handoff_contains_every_execution_and_ownership_boundary() {
         "Worker: Worker Agent (worker)",
         "Run ID: run-1",
         "Task ID: task-1",
+        "Task: Implement task one",
+        "Description: Build the first task without changing unrelated work.",
         "Canonical SQ queue: /repo/issues.jsonl",
         "Worktree: /repo.task",
         "Branch: agent-orchestrator/root/task-1",
@@ -109,6 +113,8 @@ fn mail_send_handoff_uses_expected_envelope_and_validates_receipt() {
     let handoff = Handoff {
         run_id: "run-1",
         task_id: "task-1",
+        title: "Implement task one",
+        description: "Build the first task.",
         queue: Path::new("/repo/issues.jsonl"),
         worktree: Path::new("/repo.task"),
         branch: "agent-orchestrator/root/task-1",

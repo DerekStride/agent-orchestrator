@@ -402,6 +402,8 @@ fn run_pass(
         let handoff = Handoff {
             run_id: &ledger.run_id,
             task_id: &task_id,
+            title: task.title(),
+            description: task.description(),
             queue: &ledger.queue,
             worktree: &runtime.worktree.path,
             branch: &runtime.worktree.branch,

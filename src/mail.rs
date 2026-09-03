@@ -19,6 +19,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub struct Handoff<'a> {
     pub run_id: &'a str,
     pub task_id: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
     pub queue: &'a Path,
     pub worktree: &'a Path,
     pub branch: &'a str,
@@ -321,6 +323,8 @@ Orchestrator: {} ({})\n\
 Worker: {} ({})\n\
 Run ID: {}\n\
 Task ID: {}\n\
+Task: {}\n\
+Description: {}\n\
 Canonical SQ queue: {}\n\
 Worktree: {}\n\
 Branch: {}\n\
@@ -337,6 +341,8 @@ A completed report requires a commit or artifact and non-empty validation eviden
         handoff.worker.slug,
         handoff.run_id,
         handoff.task_id,
+        handoff.title,
+        handoff.description,
         handoff.queue.display(),
         handoff.worktree.display(),
         handoff.branch,

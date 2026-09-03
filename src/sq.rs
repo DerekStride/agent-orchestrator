@@ -54,6 +54,7 @@ impl fmt::Display for TaskStatus {
 pub struct Task {
     id: String,
     title: String,
+    description: String,
     stored_status: TaskStatus,
     blocked_by: Vec<String>,
     acceptance_criteria: Vec<String>,
@@ -67,6 +68,9 @@ impl Task {
     }
     pub fn title(&self) -> &str {
         &self.title
+    }
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     pub fn stored_status(&self) -> TaskStatus {
@@ -646,6 +650,7 @@ fn parse_task(raw: Value, line: usize) -> Result<Task> {
     })?;
     let id = required_string(object, "id", line)?.to_owned();
     let title = required_string(object, "title", line)?.to_owned();
+    let description = required_string(object, "description", line)?.to_owned();
 
     if id.is_empty() {
         return Err(Error::InvalidTask {
@@ -691,6 +696,7 @@ fn parse_task(raw: Value, line: usize) -> Result<Task> {
     Ok(Task {
         id,
         title,
+        description,
         stored_status,
         blocked_by,
         acceptance_criteria,
