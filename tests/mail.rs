@@ -80,6 +80,7 @@ fn mail_handoff_contains_every_execution_and_ownership_boundary() {
         "observable behavior",
         "cargo test --locked focused",
         "Update only task task-1",
+        "first produce and validate the reported commit or durable artifact",
         "agent-orchestrator report task-1 run-1",
         "a JSON-only body",
     ] {

@@ -293,14 +293,22 @@ impl ScopedPlan {
                 .queue
                 .task(task_id)
                 .expect("scope IDs come from the loaded queue");
-            if let Some(owner_run_id) = task.owner_run_id() {
-                if owner_run_id != run_id {
+            match task.owner_run_id() {
+                Some(owner_run_id)
+                    if task.stored_status != TaskStatus::Closed && owner_run_id != run_id =>
+                {
                     return Err(Error::ForeignOwnership {
                         task_id: task_id.clone(),
                         owner_run_id: owner_run_id.to_owned(),
                         run_id: run_id.to_owned(),
                     });
                 }
+                None if task.stored_status == TaskStatus::InProgress => {
+                    return Err(Error::UnownedInProgress {
+                        task_id: task_id.clone(),
+                    });
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -407,7 +415,8 @@ impl SqClient {
             });
         }
 
-        let claimed = self.validated_plan(plan.root_task_id(), run_id, Some(plan.snapshot()))?;
+        let claimed = self.plan(plan.root_task_id())?;
+        claimed.validate_snapshot(plan.snapshot())?;
         let task = claimed
             .task(task_id)
             .expect("the pre-claim validation ensures the task is in scope");
@@ -419,6 +428,7 @@ impl SqClient {
                 actual_run_id: task.owner_run_id().map(str::to_owned),
             });
         }
+        claimed.validate_ownership(run_id)?;
 
         Ok(claimed)
     }
@@ -477,6 +487,9 @@ pub enum Error {
         task_id: String,
         owner_run_id: String,
         run_id: String,
+    },
+    UnownedInProgress {
+        task_id: String,
     },
     TaskOutsideScope {
         task_id: String,
@@ -543,6 +556,10 @@ impl fmt::Display for Error {
             } => write!(
                 formatter,
                 "SQ task `{task_id}` is owned by foreign agent_orchestrator.run_id `{owner_run_id}` (current run `{run_id}`)"
+            ),
+            Self::UnownedInProgress { task_id } => write!(
+                formatter,
+                "SQ task `{task_id}` is in_progress without agent_orchestrator.run_id ownership"
             ),
             Self::TaskOutsideScope {
                 task_id,

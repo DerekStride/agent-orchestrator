@@ -114,7 +114,7 @@ fn finish_refuses_unowned_in_progress_before_runtime_preflight() {
     assert!(!output.status.success());
     assert!(!marker.exists());
     assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("in_progress without run ownership; refusing to steal"));
+        .contains("in_progress without agent_orchestrator.run_id ownership"));
 }
 
 #[test]

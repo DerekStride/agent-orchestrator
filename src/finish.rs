@@ -186,6 +186,7 @@ fn run_pass(
     reject_orphaned_in_progress(&plan, ledger)?;
 
     let retained_ids = ledger.runtimes.keys().cloned().collect::<Vec<_>>();
+    let mut reconciliation_deferred = false;
     for task_id in retained_ids {
         let mut runtime = ledger
             .runtimes
@@ -300,6 +301,7 @@ fn run_pass(
                     format!("Agent ID lookup failed: {error}"),
                     now,
                 )?;
+                reconciliation_deferred = true;
                 continue;
             }
         };
@@ -324,6 +326,7 @@ fn run_pass(
                     format!("Herdr lookup failed: {error}"),
                     now,
                 )?;
+                reconciliation_deferred = true;
                 continue;
             }
         };
@@ -342,12 +345,29 @@ fn run_pass(
             }
         }
     }
+    if reconciliation_deferred {
+        return Ok(FinishStatus::Active);
+    }
 
     plan = sq
         .validated_plan(&ledger.root_task_id, &ledger.run_id, Some(&ledger.plan))
         .map_err(Error::Sq)?;
     reject_orphaned_in_progress(&plan, ledger)?;
-    let ready = plan.ready_task_ids().map(str::to_owned).collect::<Vec<_>>();
+    let ready = plan
+        .ready_task_ids()
+        .filter(|task_id| {
+            let task = plan
+                .task(task_id)
+                .expect("ready tasks are validated against the scoped plan");
+            task.blocked_by().iter().all(|blocker_id| {
+                ledger
+                    .runtimes
+                    .get(blocker_id)
+                    .map_or(true, |runtime| runtime.stage == RuntimeStage::Completed)
+            })
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     for task_id in ready {
         let worktree = git
             .plan_task(&plan, &ledger.worktree_root, &task_id)

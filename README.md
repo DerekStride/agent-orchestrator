@@ -60,7 +60,7 @@ A retained ledger must match the requested root, queue, repository, worktree roo
 
 ## Strict completion contract
 
-A worker must update only its assigned SQ task, then send a JSON-only AgentMail report to the handoff's orchestrator with subject:
+Before closing its SQ task, a worker must produce and validate its reported commit or durable artifact. It then updates only its assigned SQ task and sends a JSON-only AgentMail report to the handoff's orchestrator with subject:
 
 ```text
 agent-orchestrator report <task-id> <run-id>
@@ -78,5 +78,7 @@ Completion requires all of the following:
 2. `commit` names a commit reachable from the assigned branch, or `artifact` names an existing absolute path or worktree-relative path.
 3. `evidence` contains at least one non-empty validation result.
 4. The message sender, subject, task ID, and run ID match the retained worker and handoff.
+
+A dependent task is not dispatched merely because its blocker is closed in SQ. If the blocker belongs to the current run, its report and deliverable must first be validated and recorded as completed in the ledger. This prevents a worker that closes SQ before committing from creating a downstream branch at the blocker's old tip.
 
 `blocked` and `failed` require a non-empty `summary` and must not disagree with a closed SQ task. Pane/session exit alone is never completion. A malformed, duplicate, mismatched, or unverifiable report stops reconciliation and remains unread until corrected.

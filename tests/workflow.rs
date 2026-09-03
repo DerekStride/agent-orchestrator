@@ -216,6 +216,80 @@ fn workflow_claims_hands_off_stacks_and_completes_dependency_branches() {
 }
 
 #[test]
+fn closed_blocker_waits_for_accepted_report_before_dispatching_dependent() {
+    let leaf = task("leaf", "pending", &[]);
+    let root = task("root", "pending", &["leaf"]);
+    let scenario = Scenario::new(&[leaf.clone(), root.clone()]);
+    scenario.write_claim_template("leaf", vec![leaf, root.clone()]);
+
+    let first = success_json(scenario.finish());
+    let run_id = first["run_id"].as_str().unwrap().to_owned();
+    let leaf_closed = owned(task("leaf", "closed", &[]), &run_id);
+    write_queue(&scenario.queue, &[leaf_closed.clone(), root.clone()]);
+    scenario.write_claim_template("root", vec![leaf_closed.clone(), root.clone()]);
+
+    let waiting = success_json(scenario.finish());
+    assert_eq!(waiting["status"], "active");
+    assert_eq!(waiting["runtimes"].as_array().unwrap().len(), 1);
+    assert!(!scenario.worktree("root").exists());
+    assert_eq!(
+        Queue::read(&scenario.queue)
+            .unwrap()
+            .scope("root")
+            .unwrap()
+            .task("root")
+            .unwrap()
+            .stored_status(),
+        TaskStatus::Pending
+    );
+
+    let leaf_commit = commit_work(&scenario.worktree("leaf"), "leaf.txt", "leaf\n", "leaf");
+    scenario.set_report("leaf", "completed", &leaf_commit);
+
+    let dispatched = success_json(scenario.finish());
+    assert_eq!(dispatched["runtimes"][0]["stage"], "completed");
+    assert_eq!(dispatched["runtimes"][1]["task_id"], "root");
+    assert_eq!(dispatched["runtimes"][1]["stage"], "active");
+    assert_eq!(
+        git_output(&scenario.worktree("root"), &["rev-parse", "HEAD"]),
+        leaf_commit
+    );
+}
+
+#[test]
+fn transient_observation_failure_defers_new_provisioning() {
+    let running = task("running", "pending", &[]);
+    let waiting = task("waiting", "blocked", &[]);
+    let root = task("root", "pending", &["running", "waiting"]);
+    let scenario = Scenario::new(&[running.clone(), waiting.clone(), root.clone()]);
+    scenario.write_claim_template(
+        "running",
+        vec![running.clone(), waiting.clone(), root.clone()],
+    );
+
+    let first = success_json(scenario.finish());
+    let run_id = first["run_id"].as_str().unwrap();
+    let running = owned(task("running", "in_progress", &[]), run_id);
+    write_queue(
+        &scenario.queue,
+        &[running, task("waiting", "pending", &[]), root],
+    );
+    fs::write(scenario.fixture_state.join("identity-missing"), "").unwrap();
+
+    let deferred = success_json(scenario.finish());
+
+    assert_eq!(deferred["status"], "active");
+    assert_eq!(deferred["runtimes"].as_array().unwrap().len(), 1);
+    let plan = Queue::read(&scenario.queue).unwrap().scope("root").unwrap();
+    assert_eq!(
+        plan.task("waiting").unwrap().stored_status(),
+        TaskStatus::Pending
+    );
+    assert_eq!(plan.task("waiting").unwrap().owner_run_id(), None);
+    assert!(!scenario.worktree("waiting").exists());
+}
+
+#[test]
 fn workflow_rejects_foreign_ownership_report_disagreement_and_plan_drift() {
     let foreign = owned(task("root", "pending", &[]), "foreign-run");
     let foreign_scenario = Scenario::new(&[foreign]);

@@ -332,7 +332,7 @@ Dependencies: {}\n\n\
 Acceptance criteria:\n{}\n\n\
 Validation expectations:\n{}\n\n\
 Update only task {} in the canonical SQ queue. Do not take ownership of other tasks, merge branches, delete worktrees, or silently retry failed work. Send decisions and blockers to {} with AgentMail.\n\n\
-When finished, first update SQ. Then send an AgentMail message to {} with subject `{}` and a JSON-only body matching:\n\
+When finished, first produce and validate the reported commit or durable artifact. Then update SQ. Finally, send an AgentMail message to {} with subject `{}` and a JSON-only body matching:\n\
 {{\"task_id\":\"{}\",\"run_id\":\"{}\",\"status\":\"completed|blocked|failed\",\"commit\":\"COMMIT_OR_NULL\",\"artifact\":\"ARTIFACT_OR_NULL\",\"evidence\":[\"COMMAND: RESULT\"],\"summary\":\"BLOCKER_OR_FAILURE_OR_NULL\"}}\n\
 A completed report requires a commit or artifact and non-empty validation evidence. Blocked or failed reports require a non-empty summary. Pane exit alone is not completion.\n",
         handoff.orchestrator.name,

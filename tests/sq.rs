@@ -178,6 +178,46 @@ fn sq_snapshot_ignores_runtime_ownership_but_detects_plan_drift() {
         .contains("foreign agent_orchestrator.run_id `run-b`"));
 }
 
+#[test]
+fn sq_closed_foreign_ownership_is_historical() {
+    let directory = TestDir::new();
+    let queue = write_queue(
+        &directory,
+        &[
+            task(
+                "legacy",
+                "closed",
+                &[],
+                json!({"agent_orchestrator": {"run_id": "older-run"}}),
+            ),
+            task("root", "pending", &["legacy"], json!({})),
+        ],
+    );
+
+    let plan = SqClient::with_executable(&queue, "unused-sq")
+        .validated_plan("root", "current-run", None)
+        .expect("closed ownership is provenance, not an active claim");
+
+    assert_eq!(plan.status("legacy").unwrap(), TaskStatus::Closed);
+    assert_eq!(plan.ready_task_ids().collect::<Vec<_>>(), ["root"]);
+}
+
+#[test]
+fn sq_rejects_unowned_in_progress_tasks() {
+    let directory = TestDir::new();
+    let queue = write_queue(&directory, &[task("root", "in_progress", &[], json!({}))]);
+
+    let error = SqClient::with_executable(&queue, "unused-sq")
+        .validated_plan("root", "current-run", None)
+        .unwrap_err();
+
+    assert!(matches!(error, Error::UnownedInProgress { .. }));
+    assert_eq!(
+        error.to_string(),
+        "SQ task `root` is in_progress without agent_orchestrator.run_id ownership"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn sq_claim_uses_configured_executable_and_verifies_persisted_state() {

@@ -22,7 +22,7 @@ pub const MANUAL: &str = r#"# agent-orchestrator
 
 ## Completion contract
 
-A worker updates its assigned SQ task first, then sends the orchestrator the requested terminal report. `completed` requires a commit or durable artifact plus non-empty command/result validation evidence. `blocked` and `failed` name the concrete blocker or failure. Session or pane exit alone is not completion. Do not silently retry failed work, take a sibling task, merge a branch, or delete a worktree.
+A worker first produces and validates its reported commit or durable artifact, then updates its assigned SQ task, then sends the orchestrator the requested terminal report. A dependent task waits until the blocker's report and deliverable are accepted, not merely until SQ says closed. `completed` requires a commit or durable artifact plus non-empty command/result validation evidence. `blocked` and `failed` name the concrete blocker or failure. Session or pane exit alone is not completion. Do not silently retry failed work, take a sibling task, merge a branch, or delete a worktree.
 
 The terminal AgentMail body is JSON only and identifies the task, orchestration run, status, commit or artifact, evidence, and summary. The orchestrator accepts completion only when that report agrees with SQ and the referenced deliverable exists.
 
