@@ -1,0 +1,25 @@
+[package]
+name = "agent-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic SQ-driven supervisor for local coding agents"
+license = "MIT"
+repository = "https://github.com/DerekStride/agent-orchestrator"
+
+[[bin]]
+name = "agent-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+fs2 = "0.4"
+serde_json = "1.0"
+ulid = "3.0"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.0"

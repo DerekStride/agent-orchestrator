@@ -1,0 +1,28 @@
+#!/bin/sh
+# Deterministic Agent ID stand-in for behavior tests.
+set -eu
+
+log="${FIXTURE_LOG:?FIXTURE_LOG is required}"
+state="${FIXTURE_STATE:?FIXTURE_STATE is required}"
+printf 'agent-id %s\n' "$*" >>"$log"
+
+case "${1:-}" in
+  current)
+    if [ -f "$state/orchestrator.json" ]; then
+      cat "$state/orchestrator.json"
+    else
+      printf '{"version":1,"session_id":"orchestrator-session","name":"Orchestrator Agent","slug":"orchestrator","cwd":"%s","extensions":{"omp":{"data":{}}}}\n' "$PWD"
+    fi
+    ;;
+  discover)
+    if [ -f "$state/workers.json" ]; then
+      cat "$state/workers.json"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  *)
+    printf 'unsupported agent-id invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac

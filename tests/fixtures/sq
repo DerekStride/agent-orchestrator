@@ -1,0 +1,49 @@
+#!/bin/sh
+# Deterministic SQ stand-in for behavior tests.
+# Supports only the mutation agent-orchestrator performs: claiming a task.
+set -eu
+
+log="${FIXTURE_LOG:?FIXTURE_LOG is required}"
+printf 'sq %s\n' "$*" >>"$log"
+
+queue=""
+id=""
+status=""
+metadata=""
+command=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --queue) queue="$2"; shift 2 ;;
+    edit) command="edit"; id="$2"; shift 2 ;;
+    --set-status) status="$2"; shift 2 ;;
+    --merge-metadata) metadata="$2"; shift 2 ;;
+    --json) shift ;;
+    *) shift ;;
+  esac
+done
+
+if [ "$command" != "edit" ]; then
+  printf 'unsupported sq invocation\n' >&2
+  exit 1
+fi
+
+temporary="$queue.fixture"
+awk -v id="$id" -v status="$status" -v metadata="$metadata" '
+{
+  line = $0
+  if (index(line, "\"id\":\"" id "\"") > 0) {
+    if (status != "") {
+      sub(/"status":"[a-z_]+"/, "\"status\":\"" status "\"", line)
+    }
+    if (metadata != "") {
+      sub(/"metadata":\{\}/, "\"metadata\":" metadata, line)
+    }
+    updated = 1
+  }
+  print line
+}
+END { if (!updated) exit 1 }
+' "$queue" >"$temporary"
+mv "$temporary" "$queue"
+
+awk -v id="$id" 'index($0, "\"id\":\"" id "\"") > 0 { print; exit }' "$queue"
