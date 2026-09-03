@@ -6,10 +6,29 @@
 
 ## Install
 
-Requirements: a Rust toolchain plus the local `sq`, `git`, `herdr`, `agent-id`, and `agent-mail` CLIs available on `PATH`.
+Requirements: the local `sq`, `git`, `herdr`, `agent-id`, and `agent-mail` CLIs available on `PATH`.
+
+### Homebrew
+
+```sh
+brew install derekstride/tap/agent-orchestrator
+```
+
+### Cargo
+
+```sh
+cargo install agent-orchestrator
+```
+
+### Source
 
 ```sh
 cargo install --path . --locked
+```
+
+Then verify the static command surface:
+
+```sh
 agent-orchestrator prime
 ```
 
