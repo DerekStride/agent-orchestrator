@@ -30,7 +30,7 @@ pub struct FinishArgs {
     pub root_task_id: String,
 
     /// Canonical SQ JSONL queue shared by the orchestrator and workers.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, env = "SQ_QUEUE_PATH", value_name = "PATH")]
     pub queue: Option<PathBuf>,
 
     /// Git repository containing the root task's work.

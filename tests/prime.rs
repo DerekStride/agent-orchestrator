@@ -31,6 +31,7 @@ fn prime_and_help_are_static_and_finish_requires_root_task_id() {
     for expected in [
         "ROOT_TASK_ID",
         "--queue",
+        "SQ_QUEUE_PATH",
         "--repo",
         "--state-dir",
         "--worktree-root",
