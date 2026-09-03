@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+: "${AGENT_ORCHESTRATOR_FIXTURE_STATE:?}"
+
+if [ "${1-}" != "--session" ]; then
+  printf 'missing Herdr session\n' >&2
+  exit 2
+fi
+shift 2
+command_name=${1-}
+shift || true
+
+case "$command_name" in
+  status)
+    if [ -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/herdr-unavailable" ]; then
+      printf '%s\n' '{"running":false,"compatible":true}'
+    else
+      printf '%s\n' '{"running":true,"compatible":true}'
+    fi
+    ;;
+  worktree)
+    action=${1-}
+    shift || true
+    if [ "$action" != "create" ]; then
+      printf 'unsupported Herdr worktree action: %s\n' "$action" >&2
+      exit 2
+    fi
+    repo=
+    branch=
+    base=
+    path=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cwd) repo=$2; shift 2 ;;
+        --branch) branch=$2; shift 2 ;;
+        --base) base=$2; shift 2 ;;
+        --path) path=$2; shift 2 ;;
+        --label) shift 2 ;;
+        --no-focus) shift ;;
+        *) printf 'unsupported Herdr worktree argument: %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+    task_id=${path##*.}
+    workspace_id="workspace-$task_id"
+    pane_id="$workspace_id:pane"
+    git -C "$repo" worktree add -b "$branch" "$path" "$base" >/dev/null 2>&1
+    printf '%s\n%s\n' "$workspace_id" "$pane_id" > "$AGENT_ORCHESTRATOR_FIXTURE_STATE/last-workspace"
+    printf '{"result":{"type":"worktree_created","workspace":{"workspace_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$workspace_id" "$pane_id"
+    ;;
+  agent)
+    action=${1-}
+    name=${2-}
+    if [ -z "$name" ]; then
+      printf 'missing Herdr worker name\n' >&2
+      exit 2
+    fi
+    case "$action" in
+      start)
+        sed -n '1p' "$AGENT_ORCHESTRATOR_FIXTURE_STATE/last-workspace" > "$AGENT_ORCHESTRATOR_FIXTURE_STATE/worker-$name"
+        sed -n '2p' "$AGENT_ORCHESTRATOR_FIXTURE_STATE/last-workspace" >> "$AGENT_ORCHESTRATOR_FIXTURE_STATE/worker-$name"
+        result=agent_started
+        status=idle
+        ;;
+      prompt)
+        result=agent_prompted
+        status=working
+        ;;
+      get)
+        result=agent_info
+        if [ -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/herdr-agent-status" ]; then
+          status=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/herdr-agent-status")
+        else
+          status=working
+        fi
+        ;;
+      *) printf 'unsupported Herdr agent action: %s\n' "$action" >&2; exit 2 ;;
+    esac
+    workspace_id=$(sed -n '1p' "$AGENT_ORCHESTRATOR_FIXTURE_STATE/worker-$name")
+    pane_id=$(sed -n '2p' "$AGENT_ORCHESTRATOR_FIXTURE_STATE/worker-$name")
+    printf '{"result":{"type":"%s","agent":{"name":"%s","workspace_id":"%s","pane_id":"%s","agent_status":"%s"}}}\n' "$result" "$name" "$workspace_id" "$pane_id" "$status"
+    ;;
+  *)
+    printf 'unsupported Herdr command: %s\n' "$command_name" >&2
+    exit 2
+    ;;
+esac

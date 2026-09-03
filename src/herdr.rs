@@ -1,273 +1,471 @@
-use std::ffi::{OsStr, OsString};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fmt, io,
+    path::Path,
+    process::{Command, ExitStatus, Output},
+};
 
-use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug)]
-pub struct Herdr {
-    executable: PathBuf,
-    session: String,
-}
+pub const HERDR_EXECUTABLE_ENV: &str = "AGENT_ORCHESTRATOR_HERDR";
+pub const HERDR_SESSION_ENV: &str = "HERDR_SESSION";
+const DEFAULT_SESSION: &str = "default";
 
-#[derive(Clone, Debug)]
-pub struct WorktreeLaunch<'a> {
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorktreeSpec<'a> {
     pub repo: &'a Path,
     pub branch: &'a str,
     pub base: &'a str,
-    pub worktree: &'a Path,
-    pub label: &'a str,
-    pub task_id: &'a str,
-    pub run_id: &'a str,
+    pub path: &'a Path,
+    pub task_label: &'a str,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HerdrHandles {
-    pub session: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerWorkspace {
     pub workspace_id: String,
     pub pane_id: String,
-    pub agent_name: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worker {
+    pub name: String,
+    pub workspace_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentState {
+pub enum AgentStatus {
     Working,
-    Blocked,
-    Done,
     Idle,
+    Done,
+    Blocked,
     Unknown,
 }
 
-impl Herdr {
-    pub fn from_environment() -> Self {
-        Self {
-            executable: std::env::var_os("AGENT_ORCHESTRATOR_HERDR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("herdr")),
-            session: std::env::var("HERDR_SESSION").unwrap_or_else(|_| "default".to_owned()),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerDisposition {
+    Active,
+    ReportPresent,
+    Stop(WorkerStop),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStop {
+    SettledWithoutReport(AgentStatus),
+    Blocked,
+}
+
+pub fn reconcile_worker(status: AgentStatus, structured_report_present: bool) -> WorkerDisposition {
+    if structured_report_present {
+        return WorkerDisposition::ReportPresent;
+    }
+
+    match status {
+        AgentStatus::Working | AgentStatus::Unknown => WorkerDisposition::Active,
+        AgentStatus::Idle | AgentStatus::Done => {
+            WorkerDisposition::Stop(WorkerStop::SettledWithoutReport(status))
         }
+        AgentStatus::Blocked => WorkerDisposition::Stop(WorkerStop::Blocked),
+    }
+}
+
+pub fn worker_name(run_id: &str, task_id: &str) -> String {
+    let mut readable = String::with_capacity(12);
+    let mut previous_separator = false;
+    for byte in task_id.bytes() {
+        let character = match byte {
+            b'a'..=b'z' | b'0'..=b'9' => byte as char,
+            b'A'..=b'Z' => (byte + (b'a' - b'A')) as char,
+            b'-' | b'_' => byte as char,
+            _ => '-',
+        };
+        let separator = matches!(character, '-' | '_');
+        if separator && (readable.is_empty() || previous_separator) {
+            continue;
+        }
+        readable.push(character);
+        previous_separator = separator;
+        if readable.len() == 12 {
+            break;
+        }
+    }
+    while readable.ends_with(['-', '_']) {
+        readable.pop();
+    }
+    if readable.is_empty() {
+        readable.push_str("task");
+    }
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in run_id
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(task_id.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    format!("ao-{readable}-{hash:016x}")
+}
+
+#[derive(Debug, Clone)]
+pub struct HerdrClient {
+    executable: OsString,
+    session: String,
+}
+
+impl HerdrClient {
+    pub fn configured() -> Self {
+        let executable = env::var_os(HERDR_EXECUTABLE_ENV)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| OsString::from("herdr"));
+        let session = env::var(HERDR_SESSION_ENV)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_SESSION.to_owned());
+        Self::with_executable(executable, session)
+    }
+
+    pub fn with_executable(executable: impl Into<OsString>, session: impl Into<String>) -> Self {
+        Self {
+            executable: executable.into(),
+            session: session.into(),
+        }
+    }
+
+    pub fn executable(&self) -> &OsStr {
+        &self.executable
+    }
+
+    pub fn session(&self) -> &str {
+        &self.session
     }
 
     pub fn preflight(&self) -> Result<()> {
-        self.run([OsStr::new("status")]).map(|_| ())
-    }
-
-    pub fn create_worktree(&self, launch: &WorktreeLaunch<'_>) -> Result<HerdrHandles> {
-        let workspace = self.run_json([
-            OsStr::new("worktree"),
-            OsStr::new("create"),
-            OsStr::new("--cwd"),
-            launch.repo.as_os_str(),
-            OsStr::new("--branch"),
-            OsStr::new(launch.branch),
-            OsStr::new("--base"),
-            OsStr::new(launch.base),
-            OsStr::new("--path"),
-            launch.worktree.as_os_str(),
-            OsStr::new("--label"),
-            OsStr::new(launch.label),
-            OsStr::new("--no-focus"),
-        ])?;
-        let workspace_id = required_string(
-            &workspace,
-            &["result", "workspace", "workspace_id"],
-            "workspace ID",
-        )?;
-        let pane_id = required_string(
-            &workspace,
-            &["result", "root_pane", "pane_id"],
-            "root pane ID",
-        )?;
-        let agent_name = worker_name(launch.task_id, launch.run_id);
-
-        self.run_json([
-            OsStr::new("agent"),
-            OsStr::new("start"),
-            OsStr::new(&agent_name),
-            OsStr::new("--kind"),
-            OsStr::new("omp"),
-            OsStr::new("--pane"),
-            OsStr::new(&pane_id),
-        ])
-        .with_context(|| {
-            format!(
-                "Herdr worktree workspace {workspace_id} and pane {pane_id} were created, but OMP failed to start"
-            )
+        let output = self.invoke("preflighting Herdr", |command| {
+            command.args(["status", "server", "--json"]);
         })?;
+        if !output.status.success() {
+            return Err(Error::SessionUnavailable {
+                session: self.session.clone(),
+                detail: failure_detail(&output),
+            });
+        }
 
-        Ok(HerdrHandles {
-            session: self.session.clone(),
-            workspace_id,
-            pane_id,
-            agent_name,
-        })
-    }
-
-    pub fn prompt(&self, handles: &HerdrHandles, prompt: &str) -> Result<()> {
-        self.run_json([
-            OsStr::new("agent"),
-            OsStr::new("prompt"),
-            OsStr::new(&handles.agent_name),
-            OsStr::new(prompt),
-        ])
-        .with_context(|| {
-            format!(
-                "OMP agent {} started in pane {}, but the task handoff prompt failed",
-                handles.agent_name, handles.pane_id
-            )
-        })?;
+        let status: ServerStatus =
+            serde_json::from_slice(&output.stdout).map_err(|source| Error::InvalidJson {
+                operation: "preflighting Herdr",
+                source,
+            })?;
+        if !status.running {
+            return Err(Error::SessionUnavailable {
+                session: self.session.clone(),
+                detail: "server is not running".to_owned(),
+            });
+        }
+        if status.compatible == Some(false) {
+            return Err(Error::SessionUnavailable {
+                session: self.session.clone(),
+                detail: "server protocol is incompatible".to_owned(),
+            });
+        }
         Ok(())
     }
 
-    pub fn agent_state(&self, handles: &HerdrHandles) -> Result<AgentState> {
-        let response = self.run_json([
-            OsStr::new("agent"),
-            OsStr::new("get"),
-            OsStr::new(&handles.agent_name),
-        ])?;
-        Self::parse_agent_state(&response)
-    }
+    pub fn create_worktree(&self, spec: WorktreeSpec<'_>) -> Result<WorkerWorkspace> {
+        let response = self.invoke_json("creating Herdr worktree", |command| {
+            command
+                .args(["worktree", "create", "--cwd"])
+                .arg(spec.repo)
+                .args(["--branch", spec.branch, "--base", spec.base, "--path"])
+                .arg(spec.path)
+                .args(["--label", spec.task_label, "--no-focus"]);
+        })?;
+        expect_response_type(&response, "creating Herdr worktree", "worktree_created")?;
 
-    fn parse_agent_state(response: &Value) -> Result<AgentState> {
-        let state = [
-            &["result", "agent", "agent_status"][..],
-            &["result", "agent", "state"][..],
-            &["result", "agent", "status"][..],
-            &["result", "state"][..],
-        ]
-        .into_iter()
-        .find_map(|path| string_at(response, path))
-        .ok_or_else(|| anyhow::anyhow!("Herdr agent response omitted lifecycle state"))?;
-
-        match state {
-            "working" => Ok(AgentState::Working),
-            "blocked" => Ok(AgentState::Blocked),
-            "done" => Ok(AgentState::Done),
-            "idle" => Ok(AgentState::Idle),
-            "unknown" => Ok(AgentState::Unknown),
-            other => bail!("Herdr returned unsupported agent state {other}"),
-        }
-    }
-
-    fn run_json<I, S>(&self, args: I) -> Result<Value>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let output = self.run(args)?;
-        serde_json::from_slice(&output.stdout).with_context(|| {
-            format!(
-                "Herdr returned invalid JSON: {}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            )
+        Ok(WorkerWorkspace {
+            workspace_id: response_string(
+                &response,
+                "/result/workspace/workspace_id",
+                "creating Herdr worktree",
+            )?,
+            pane_id: response_string(
+                &response,
+                "/result/root_pane/pane_id",
+                "creating Herdr worktree",
+            )?,
         })
     }
 
-    fn run<I, S>(&self, args: I) -> Result<Output>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut command_args = vec![OsString::from("--session"), OsString::from(&self.session)];
-        command_args.extend(args.into_iter().map(|arg| arg.as_ref().to_os_string()));
-        let output = Command::new(&self.executable).args(&command_args).output();
-        let output = match output {
-            Ok(output) => output,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                bail!(
-                    "Herdr is required for `finish` but executable {} is not available",
-                    self.executable.display()
-                )
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to run {} {}",
-                        self.executable.display(),
-                        display_args(&command_args)
-                    )
-                });
-            }
-        };
+    pub fn start_omp(
+        &self,
+        workspace: &WorkerWorkspace,
+        run_id: &str,
+        task_id: &str,
+    ) -> Result<Worker> {
+        let name = worker_name(run_id, task_id);
+        let response = self.invoke_json("starting OMP worker", |command| {
+            command
+                .args(["agent", "start", &name, "--kind", "omp", "--pane"])
+                .arg(&workspace.pane_id);
+        })?;
+        let agent = parse_agent(&response, "starting OMP worker", "agent_started")?;
+        validate_agent(
+            &agent,
+            &name,
+            &workspace.workspace_id,
+            &workspace.pane_id,
+            "starting OMP worker",
+        )?;
 
+        Ok(Worker {
+            name,
+            workspace_id: workspace.workspace_id.clone(),
+            pane_id: workspace.pane_id.clone(),
+        })
+    }
+
+    pub fn prompt_after_handoff(
+        &self,
+        worker: &Worker,
+        handoff_receipt: &str,
+        prompt: &str,
+    ) -> Result<AgentStatus> {
+        if handoff_receipt.trim().is_empty() {
+            return Err(Error::MissingHandoffReceipt);
+        }
+
+        let response = self.invoke_json("prompting OMP worker", |command| {
+            command.args(["agent", "prompt", &worker.name, prompt]);
+        })?;
+        let agent = parse_agent(&response, "prompting OMP worker", "agent_prompted")?;
+        validate_agent(
+            &agent,
+            &worker.name,
+            &worker.workspace_id,
+            &worker.pane_id,
+            "prompting OMP worker",
+        )?;
+        Ok(agent.agent_status)
+    }
+
+    pub fn status(&self, worker: &Worker) -> Result<AgentStatus> {
+        let response = self.invoke_json("reading OMP worker", |command| {
+            command.args(["agent", "get", &worker.name]);
+        })?;
+        let agent = parse_agent(&response, "reading OMP worker", "agent_info")?;
+        validate_agent(
+            &agent,
+            &worker.name,
+            &worker.workspace_id,
+            &worker.pane_id,
+            "reading OMP worker",
+        )?;
+        Ok(agent.agent_status)
+    }
+
+    fn invoke(
+        &self,
+        operation: &'static str,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Output> {
+        let mut command = Command::new(&self.executable);
+        command.args(["--session", &self.session]);
+        configure(&mut command);
+        command.output().map_err(|source| Error::Start {
+            executable: self.executable.clone(),
+            session: self.session.clone(),
+            operation,
+            source,
+        })
+    }
+
+    fn invoke_json(
+        &self,
+        operation: &'static str,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Value> {
+        let output = self.invoke(operation, configure)?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            bail!(
-                "Herdr command `{}` failed: {}",
-                display_args(&command_args),
-                if stderr.is_empty() {
-                    format!("exit status {}", output.status)
-                } else {
-                    stderr
-                }
-            );
+            return Err(Error::CommandFailed {
+                operation,
+                status: output.status,
+                detail: failure_detail(&output),
+            });
         }
-        Ok(output)
+        serde_json::from_slice(&output.stdout)
+            .map_err(|source| Error::InvalidJson { operation, source })
     }
 }
 
-fn string_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    path.iter()
-        .try_fold(value, |current, segment| current.get(segment))?
-        .as_str()
+#[derive(Debug, Deserialize)]
+struct ServerStatus {
+    running: bool,
+    compatible: Option<bool>,
 }
 
-fn required_string(value: &Value, path: &[&str], label: &str) -> Result<String> {
-    string_at(value, path)
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Herdr response omitted {label}"))
+#[derive(Debug, Deserialize)]
+struct AgentResponse {
+    name: Option<String>,
+    workspace_id: String,
+    pane_id: String,
+    agent_status: AgentStatus,
 }
 
-fn worker_name(task_id: &str, run_id: &str) -> String {
-    let raw = format!(
-        "ao-{task_id}-{}",
-        run_id.chars().take(8).collect::<String>()
-    );
-    let mut name = raw
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
+fn parse_agent(
+    response: &Value,
+    operation: &'static str,
+    expected_type: &str,
+) -> Result<AgentResponse> {
+    expect_response_type(response, operation, expected_type)?;
+    serde_json::from_value(response.pointer("/result/agent").cloned().ok_or_else(|| {
+        Error::UnexpectedResponse {
+            operation,
+            detail: "missing `result.agent`".to_owned(),
+        }
+    })?)
+    .map_err(|source| Error::InvalidJson { operation, source })
+}
+
+fn validate_agent(
+    agent: &AgentResponse,
+    expected_name: &str,
+    expected_workspace_id: &str,
+    expected_pane_id: &str,
+    operation: &'static str,
+) -> Result<()> {
+    if agent.name.as_deref() != Some(expected_name) {
+        return Err(Error::UnexpectedResponse {
+            operation,
+            detail: format!(
+                "returned agent name `{}`, expected `{expected_name}`",
+                agent.name.as_deref().unwrap_or("<missing>")
+            ),
+        });
+    }
+    if agent.workspace_id != expected_workspace_id || agent.pane_id != expected_pane_id {
+        return Err(Error::UnexpectedResponse {
+            operation,
+            detail: format!(
+                "returned workspace/pane `{}/{}`, expected `{expected_workspace_id}/{expected_pane_id}`",
+                agent.workspace_id, agent.pane_id
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn expect_response_type(response: &Value, operation: &'static str, expected: &str) -> Result<()> {
+    let actual = response
+        .pointer("/result/type")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::UnexpectedResponse {
+            operation,
+            detail: format!("returned result type `{actual}`, expected `{expected}`"),
         })
-        .collect::<String>();
-    name.truncate(32);
-    name
-}
-
-fn display_args(args: &[OsString]) -> String {
-    args.iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_names_are_valid_and_bounded() {
-        let name = worker_name("Feature/Very.Long.Task", "01ABCDEF0123456789");
-        assert!(name.starts_with("ao-feature-very-long-task"));
-        assert!(name.len() <= 32);
-        assert!(name.chars().all(|character| character.is_ascii_lowercase()
-            || character.is_ascii_digit()
-            || matches!(character, '-' | '_')));
     }
+}
 
-    #[test]
-    fn parses_current_herdr_agent_status_shape() {
-        let value = serde_json::json!({"result": {"agent": {"agent_status": "blocked"}}});
-        assert_eq!(
-            Herdr::parse_agent_state(&value).unwrap(),
-            AgentState::Blocked
-        );
+fn response_string(response: &Value, pointer: &str, operation: &'static str) -> Result<String> {
+    response
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::UnexpectedResponse {
+            operation,
+            detail: format!("missing non-empty `{pointer}`"),
+        })
+}
+
+fn failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if stderr.is_empty() {
+        format!("process exited with {}", output.status)
+    } else {
+        stderr
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Start {
+        executable: OsString,
+        session: String,
+        operation: &'static str,
+        source: io::Error,
+    },
+    SessionUnavailable {
+        session: String,
+        detail: String,
+    },
+    CommandFailed {
+        operation: &'static str,
+        status: ExitStatus,
+        detail: String,
+    },
+    InvalidJson {
+        operation: &'static str,
+        source: serde_json::Error,
+    },
+    UnexpectedResponse {
+        operation: &'static str,
+        detail: String,
+    },
+    MissingHandoffReceipt,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start {
+                executable,
+                session,
+                operation,
+                source,
+            } => write!(
+                formatter,
+                "cannot start Herdr executable `{}` for session `{session}` while {operation}: {source}",
+                executable.to_string_lossy()
+            ),
+            Self::SessionUnavailable { session, detail } => {
+                write!(formatter, "Herdr session `{session}` is unavailable: {detail}")
+            }
+            Self::CommandFailed {
+                operation,
+                status,
+                detail,
+            } => write!(formatter, "Herdr failed while {operation} ({status}): {detail}"),
+            Self::InvalidJson { operation, source } => {
+                write!(formatter, "Herdr returned invalid JSON while {operation}: {source}")
+            }
+            Self::UnexpectedResponse { operation, detail } => {
+                write!(formatter, "Herdr returned an unexpected response while {operation}: {detail}")
+            }
+            Self::MissingHandoffReceipt => write!(
+                formatter,
+                "cannot prompt OMP worker before a durable AgentMail handoff receipt exists"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Start { source, .. } => Some(source),
+            Self::InvalidJson { source, .. } => Some(source),
+            _ => None,
+        }
     }
 }

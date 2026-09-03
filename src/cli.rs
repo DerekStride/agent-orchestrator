@@ -6,62 +6,54 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "agent-orchestrator",
     version,
-    about = "Finish an SQ task tree with supervised coding agents",
-    long_about = "agent-orchestrator reconciles an explicitly scoped SQ dependency tree with Git worktrees, Herdr panes, Agent ID identities, and AgentMail evidence."
+    about = "Coordinate scoped coding-agent work through SQ and AgentMail",
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Commands {
-    /// Reconcile one SQ task tree until it completes or needs intervention
+pub enum Command {
+    /// Print the agent-facing orchestration manual.
+    Prime,
+
+    /// Drive one root SQ task to a reported terminal state.
     Finish(FinishArgs),
-    /// Output the agent-facing orchestration workflow
-    Prime(PrimeArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct FinishArgs {
-    /// Root task whose dependency closure defines the only allowed scope
+    /// Root SQ task whose scoped orchestration run should finish.
     #[arg(value_name = "ROOT_TASK_ID")]
     pub root_task_id: String,
 
-    /// Canonical SQ JSONL queue
-    #[arg(
-        long,
-        value_name = "PATH",
-        env = "SQ_QUEUE_PATH",
-        default_value = ".sift/issues.jsonl"
-    )]
-    pub queue: PathBuf,
+    /// Canonical SQ JSONL queue shared by the orchestrator and workers.
+    #[arg(long, value_name = "PATH")]
+    pub queue: Option<PathBuf>,
 
-    /// Git repository containing the work to perform
-    #[arg(long, value_name = "PATH", default_value = ".")]
-    pub repo: PathBuf,
+    /// Git repository containing the root task's work.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<PathBuf>,
 
-    /// Directory for the runtime ledger
-    #[arg(long, value_name = "PATH", default_value = ".agent-orchestrator")]
-    pub state_dir: PathBuf,
+    /// Directory for durable orchestration run state.
+    #[arg(long, value_name = "PATH")]
+    pub state_dir: Option<PathBuf>,
 
-    /// Parent directory for task worktrees; defaults beside the repository
+    /// Parent directory in which worker worktrees are created.
     #[arg(long, value_name = "PATH")]
     pub worktree_root: Option<PathBuf>,
 
-    /// Perform one reconciliation pass instead of waiting for workers
+    /// Diagnose and dispatch once instead of polling until completion.
     #[arg(long)]
     pub once: bool,
 
-    /// Seconds between reconciliation passes
+    /// Delay between orchestration polling passes.
     #[arg(long, value_name = "SECONDS", default_value_t = 5)]
     pub poll_seconds: u64,
 
-    /// Seconds without a worker heartbeat before it is considered lost
+    /// Maximum worker lease duration before one-pass diagnosis.
     #[arg(long, value_name = "SECONDS", default_value_t = 900)]
     pub lease_seconds: u64,
 }
-
-#[derive(Debug, Args)]
-#[command(about = "Output the agent-facing orchestration workflow")]
-pub struct PrimeArgs {}

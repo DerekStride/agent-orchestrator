@@ -1,18 +1,19 @@
-use std::ffi::{OsStr, OsString};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fmt, io,
+    path::Path,
+    process::{Command, ExitStatus, Output},
+    string::FromUtf8Error,
+};
 
-use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::identity::Identity;
-use crate::sq::TaskStatus;
+use crate::{identity::Identity, sq::TaskStatus};
 
-#[derive(Clone, Debug)]
-pub struct AgentMail {
-    executable: PathBuf,
-}
+pub const AGENT_MAIL_EXECUTABLE_ENV: &str = "AGENT_ORCHESTRATOR_AGENT_MAIL";
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Clone, Debug)]
 pub struct Handoff<'a> {
@@ -33,13 +34,11 @@ pub struct MailReceipt {
     pub id: String,
     pub recipient: String,
     pub sender: String,
-    #[serde(default)]
     pub subject: String,
     #[serde(default)]
     pub timestamp: String,
     #[serde(default)]
     pub mailbox: String,
-    #[serde(default)]
     pub state: String,
 }
 
@@ -77,39 +76,29 @@ pub struct WorkerReport {
 impl WorkerReport {
     pub fn validate(&self, expected_task_id: &str, expected_run_id: &str) -> Result<()> {
         if self.task_id != expected_task_id || self.run_id != expected_run_id {
-            bail!(
-                "worker report belongs to task {} run {}, expected task {} run {}",
-                self.task_id,
-                self.run_id,
-                expected_task_id,
-                expected_run_id
-            );
+            return Err(Error::ReportCorrelation {
+                task_id: self.task_id.clone(),
+                run_id: self.run_id.clone(),
+                expected_task_id: expected_task_id.to_owned(),
+                expected_run_id: expected_run_id.to_owned(),
+            });
         }
 
         match self.status {
             ReportStatus::Completed => {
-                let has_deliverable = self
-                    .commit
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                    || self
-                        .artifact
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty());
+                let has_deliverable = nonempty(&self.commit) || nonempty(&self.artifact);
                 if !has_deliverable {
-                    bail!("completed worker report must include a commit or artifact");
+                    return Err(Error::CompletedWithoutDeliverable);
                 }
-                if self.evidence.iter().all(|value| value.trim().is_empty()) {
-                    bail!("completed worker report must include validation evidence");
+                if !self.evidence.iter().any(|value| !value.trim().is_empty()) {
+                    return Err(Error::CompletedWithoutEvidence);
                 }
             }
             ReportStatus::Blocked | ReportStatus::Failed => {
-                if self
-                    .summary
-                    .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    bail!("blocked or failed worker report must include a summary");
+                if !nonempty(&self.summary) {
+                    return Err(Error::TerminalReportWithoutSummary {
+                        status: self.status.clone(),
+                    });
                 }
             }
         }
@@ -123,16 +112,17 @@ pub fn reconcile_report(
 ) -> Result<ReportDisposition> {
     match (&report.status, task_status) {
         (ReportStatus::Completed, TaskStatus::Closed) => Ok(ReportDisposition::Completed),
-        (ReportStatus::Completed, status) => bail!(
-            "worker reported task {} completed but SQ status is {status:?}",
-            report.task_id
-        ),
+        (ReportStatus::Completed, status) => Err(Error::SqStatusMismatch {
+            task_id: report.task_id.clone(),
+            report_status: report.status.clone(),
+            sq_status: *status,
+        }),
         (ReportStatus::Blocked, TaskStatus::Closed)
-        | (ReportStatus::Failed, TaskStatus::Closed) => bail!(
-            "worker reported task {} {:?} after SQ was closed",
-            report.task_id,
-            report.status
-        ),
+        | (ReportStatus::Failed, TaskStatus::Closed) => Err(Error::SqStatusMismatch {
+            task_id: report.task_id.clone(),
+            report_status: report.status.clone(),
+            sq_status: TaskStatus::Closed,
+        }),
         (ReportStatus::Blocked, _) => Ok(ReportDisposition::Blocked),
         (ReportStatus::Failed, _) => Ok(ReportDisposition::Failed),
     }
@@ -145,32 +135,51 @@ struct MailHeader {
     subject: String,
 }
 
-impl AgentMail {
-    pub fn from_environment() -> Self {
+#[derive(Clone, Debug)]
+pub struct AgentMailClient {
+    executable: OsString,
+}
+
+impl AgentMailClient {
+    pub fn configured() -> Self {
+        let executable = env::var_os(AGENT_MAIL_EXECUTABLE_ENV)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| OsString::from("agent-mail"));
+        Self::with_executable(executable)
+    }
+
+    pub fn with_executable(executable: impl Into<OsString>) -> Self {
         Self {
-            executable: std::env::var_os("AGENT_ORCHESTRATOR_AGENT_MAIL")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("agent-mail")),
+            executable: executable.into(),
         }
+    }
+
+    pub fn executable(&self) -> &OsStr {
+        &self.executable
     }
 
     pub fn send_handoff(&self, handoff: &Handoff<'_>) -> Result<MailReceipt> {
         let subject = handoff_subject(handoff.task_id, handoff.run_id);
         let body = handoff_body(handoff);
-        self.run_json([
-            OsStr::new("send"),
-            OsStr::new("--to"),
-            OsStr::new(&handoff.worker.slug),
-            OsStr::new("--from"),
-            OsStr::new(&handoff.orchestrator.slug),
-            OsStr::new("--reply-to"),
-            OsStr::new(&handoff.orchestrator.slug),
-            OsStr::new("--subject"),
-            OsStr::new(&subject),
-            OsStr::new("--body"),
-            OsStr::new(&body),
-            OsStr::new("--json"),
-        ])
+        let receipt: MailReceipt = self.invoke_json(
+            "sending the worker handoff",
+            [
+                OsStr::new("send"),
+                OsStr::new("--to"),
+                OsStr::new(&handoff.worker.slug),
+                OsStr::new("--from"),
+                OsStr::new(&handoff.orchestrator.slug),
+                OsStr::new("--reply-to"),
+                OsStr::new(&handoff.orchestrator.slug),
+                OsStr::new("--subject"),
+                OsStr::new(&subject),
+                OsStr::new("--body"),
+                OsStr::new(&body),
+                OsStr::new("--json"),
+            ],
+        )?;
+        validate_receipt(&receipt, handoff, &subject)?;
+        Ok(receipt)
     }
 
     pub fn scan_report(
@@ -180,108 +189,117 @@ impl AgentMail {
         task_id: &str,
         run_id: &str,
     ) -> Result<Option<(String, WorkerReport)>> {
-        let headers: Vec<MailHeader> = self.run_json([
-            OsStr::new("scan"),
-            OsStr::new("--to"),
-            OsStr::new(&orchestrator.slug),
-            OsStr::new("--json"),
-        ])?;
+        let headers: Vec<MailHeader> = self.invoke_json(
+            "scanning unread worker reports",
+            [
+                OsStr::new("scan"),
+                OsStr::new("--to"),
+                OsStr::new(&orchestrator.slug),
+                OsStr::new("--json"),
+            ],
+        )?;
         let expected_subject = report_subject(task_id, run_id);
-        let matching = headers
+        let mut matching = headers
             .into_iter()
             .filter(|header| {
-                (header.sender == worker.slug || header.sender == worker.name)
-                    && header.subject == expected_subject
+                sender_matches(&header.sender, worker) && header.subject == expected_subject
             })
             .collect::<Vec<_>>();
 
-        match matching.as_slice() {
-            [] => Ok(None),
-            [header] => {
-                let text = self.run_text([
-                    OsStr::new("read"),
-                    OsStr::new(&header.id),
-                    OsStr::new("--peek"),
-                ])?;
+        match matching.len() {
+            0 => Ok(None),
+            1 => {
+                let header = matching.pop().expect("the match count was checked");
+                if header.id.trim().is_empty() {
+                    return Err(Error::InvalidMailHeader {
+                        reason: "matching report has an empty message ID".to_owned(),
+                    });
+                }
+                let text = self.invoke_text(
+                    "reading the unread worker report",
+                    [
+                        OsStr::new("read"),
+                        OsStr::new(&header.id),
+                        OsStr::new("--peek"),
+                    ],
+                )?;
+                validate_message_headers(&text, &header.id, worker, &expected_subject)?;
                 let report: WorkerReport =
-                    serde_json::from_str(message_body(&text)).with_context(|| {
-                        format!(
-                            "AgentMail report {} body is not valid report JSON",
-                            header.id
-                        )
+                    serde_json::from_str(message_body(&text)).map_err(|source| {
+                        Error::InvalidReportJson {
+                            message_id: header.id.clone(),
+                            source,
+                        }
                     })?;
                 report.validate(task_id, run_id)?;
-                Ok(Some((header.id.clone(), report)))
+                Ok(Some((header.id, report)))
             }
-            _ => bail!("multiple unread AgentMail reports match task {task_id} run {run_id}"),
+            count => Err(Error::MultipleReports {
+                task_id: task_id.to_owned(),
+                run_id: run_id.to_owned(),
+                count,
+            }),
         }
     }
 
     pub fn mark_read(&self, message_id: &str) -> Result<()> {
-        self.run_text([OsStr::new("read"), OsStr::new(message_id)])?;
+        if message_id.trim().is_empty() {
+            return Err(Error::InvalidMailHeader {
+                reason: "cannot mark an empty message ID as read".to_owned(),
+            });
+        }
+        self.invoke_text(
+            "marking the worker report read",
+            [OsStr::new("read"), OsStr::new(message_id)],
+        )?;
         Ok(())
     }
 
-    fn run_json<T, I, S>(&self, args: I) -> Result<T>
+    fn invoke_json<T, I, S>(&self, operation: &'static str, args: I) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.run(args)?;
-        serde_json::from_slice(&output.stdout).with_context(|| {
-            format!(
-                "AgentMail returned invalid JSON: {}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            )
+        let output = self.invoke(operation, args)?;
+        serde_json::from_slice(&output.stdout).map_err(|source| Error::InvalidJson {
+            operation,
+            output: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            source,
         })
     }
 
-    fn run_text<I, S>(&self, args: I) -> Result<String>
+    fn invoke_text<I, S>(&self, operation: &'static str, args: I) -> Result<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.run(args)?;
-        String::from_utf8(output.stdout).context("AgentMail returned non-UTF-8 output")
+        let output = self.invoke(operation, args)?;
+        String::from_utf8(output.stdout).map_err(|source| Error::InvalidUtf8 { operation, source })
     }
 
-    fn run<I, S>(&self, args: I) -> Result<Output>
+    fn invoke<I, S>(&self, operation: &'static str, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let args = args
-            .into_iter()
-            .map(|arg| arg.as_ref().to_os_string())
-            .collect::<Vec<OsString>>();
-        let output = Command::new(&self.executable).args(&args).output();
-        let output = match output {
-            Ok(output) => output,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                bail!(
-                    "AgentMail executable {} is not available",
-                    self.executable.display()
-                )
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to run {}", self.executable.display()));
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            bail!(
-                "AgentMail command failed: {}",
-                if stderr.is_empty() {
-                    format!("exit status {}", output.status)
-                } else {
-                    stderr
-                }
-            );
+        let output = Command::new(&self.executable)
+            .args(args)
+            .output()
+            .map_err(|source| Error::Start {
+                executable: self.executable.clone(),
+                operation,
+                source,
+            })?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(Error::CommandFailed {
+                operation,
+                status: output.status,
+                detail: failure_detail(&output),
+            })
         }
-        Ok(output)
     }
 }
 
@@ -293,7 +311,7 @@ pub fn report_subject(task_id: &str, run_id: &str) -> String {
     format!("agent-orchestrator report {task_id} {run_id}")
 }
 
-fn handoff_body(handoff: &Handoff<'_>) -> String {
+pub fn handoff_body(handoff: &Handoff<'_>) -> String {
     let dependencies = list_or_none(handoff.dependencies);
     let acceptance = numbered(handoff.acceptance_criteria);
     let checks = numbered(handoff.validation_checks);
@@ -312,7 +330,7 @@ Validation expectations:\n{}\n\n\
 Update only task {} in the canonical SQ queue. Do not take ownership of other tasks, merge branches, delete worktrees, or silently retry failed work. Send decisions and blockers to {} with AgentMail.\n\n\
 When finished, first update SQ. Then send an AgentMail message to {} with subject `{}` and a JSON-only body matching:\n\
 {{\"task_id\":\"{}\",\"run_id\":\"{}\",\"status\":\"completed|blocked|failed\",\"commit\":\"COMMIT_OR_NULL\",\"artifact\":\"ARTIFACT_OR_NULL\",\"evidence\":[\"COMMAND: RESULT\"],\"summary\":\"BLOCKER_OR_FAILURE_OR_NULL\"}}\n\
-A completed report requires a commit or artifact and non-empty validation evidence. Pane exit alone is not completion.\n",
+A completed report requires a commit or artifact and non-empty validation evidence. Blocked or failed reports require a non-empty summary. Pane exit alone is not completion.\n",
         handoff.orchestrator.name,
         handoff.orchestrator.slug,
         handoff.worker.name,
@@ -332,6 +350,83 @@ A completed report requires a commit or artifact and non-empty validation eviden
         handoff.task_id,
         handoff.run_id,
     )
+}
+
+fn validate_receipt(receipt: &MailReceipt, handoff: &Handoff<'_>, subject: &str) -> Result<()> {
+    if receipt.id.trim().is_empty() {
+        return Err(Error::InvalidReceipt {
+            reason: "missing non-empty `id`".to_owned(),
+        });
+    }
+    if receipt.recipient != handoff.worker.slug {
+        return Err(Error::InvalidReceipt {
+            reason: format!(
+                "recipient `{}`, expected `{}`",
+                receipt.recipient, handoff.worker.slug
+            ),
+        });
+    }
+    if !sender_matches(&receipt.sender, handoff.orchestrator) {
+        return Err(Error::InvalidReceipt {
+            reason: format!(
+                "sender `{}`, expected `{}`",
+                receipt.sender, handoff.orchestrator.slug
+            ),
+        });
+    }
+    if receipt.subject != subject {
+        return Err(Error::InvalidReceipt {
+            reason: format!("subject `{}`, expected `{subject}`", receipt.subject),
+        });
+    }
+    if receipt.state != "delivered" {
+        return Err(Error::InvalidReceipt {
+            reason: format!("state `{}`, expected `delivered`", receipt.state),
+        });
+    }
+    Ok(())
+}
+
+fn validate_message_headers(
+    message: &str,
+    expected_id: &str,
+    worker: &Identity,
+    expected_subject: &str,
+) -> Result<()> {
+    let from = message_header(message, "From").ok_or_else(|| Error::InvalidMailHeader {
+        reason: "message is missing `From`".to_owned(),
+    })?;
+    if !sender_matches(from, worker) {
+        return Err(Error::InvalidMailHeader {
+            reason: format!("sender `{from}`, expected `{}`", worker.slug),
+        });
+    }
+    let subject = message_header(message, "Subject").ok_or_else(|| Error::InvalidMailHeader {
+        reason: "message is missing `Subject`".to_owned(),
+    })?;
+    if subject != expected_subject {
+        return Err(Error::InvalidMailHeader {
+            reason: format!("subject `{subject}`, expected `{expected_subject}`"),
+        });
+    }
+    if let Some(message_id) = message_header(message, "Message-ID") {
+        if message_id != expected_id {
+            return Err(Error::InvalidMailHeader {
+                reason: format!("message ID `{message_id}`, expected `{expected_id}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sender_matches(sender: &str, identity: &Identity) -> bool {
+    sender == identity.slug || sender == identity.name
+}
+
+fn nonempty(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn list_or_none(values: &[String]) -> String {
@@ -355,6 +450,19 @@ fn numbered(values: &[String]) -> String {
     }
 }
 
+fn message_header<'a>(message: &'a str, name: &str) -> Option<&'a str> {
+    message
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .find_map(|line| {
+            let (field, value) = line.split_once(':')?;
+            field
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 fn message_body(message: &str) -> &str {
     message
         .split_once("\r\n\r\n")
@@ -363,100 +471,155 @@ fn message_body(message: &str) -> &str {
         .unwrap_or_else(|| message.trim())
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
+fn failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if stderr.is_empty() {
+        format!("process exited with {}", output.status)
+    } else {
+        stderr
+    }
+}
 
-    use serde_json::{json, Map};
+#[derive(Debug)]
+pub enum Error {
+    Start {
+        executable: OsString,
+        operation: &'static str,
+        source: io::Error,
+    },
+    CommandFailed {
+        operation: &'static str,
+        status: ExitStatus,
+        detail: String,
+    },
+    InvalidJson {
+        operation: &'static str,
+        output: String,
+        source: serde_json::Error,
+    },
+    InvalidUtf8 {
+        operation: &'static str,
+        source: FromUtf8Error,
+    },
+    InvalidReceipt {
+        reason: String,
+    },
+    InvalidMailHeader {
+        reason: String,
+    },
+    MultipleReports {
+        task_id: String,
+        run_id: String,
+        count: usize,
+    },
+    InvalidReportJson {
+        message_id: String,
+        source: serde_json::Error,
+    },
+    ReportCorrelation {
+        task_id: String,
+        run_id: String,
+        expected_task_id: String,
+        expected_run_id: String,
+    },
+    CompletedWithoutDeliverable,
+    CompletedWithoutEvidence,
+    TerminalReportWithoutSummary {
+        status: ReportStatus,
+    },
+    SqStatusMismatch {
+        task_id: String,
+        report_status: ReportStatus,
+        sq_status: TaskStatus,
+    },
+}
 
-    use super::*;
-
-    fn identity(name: &str, slug: &str) -> Identity {
-        Identity {
-            session_id: format!("{slug}-session"),
-            name: name.to_owned(),
-            slug: slug.to_owned(),
-            cwd: Some(PathBuf::from("/tmp/worktree")),
-            state: None,
-            extensions: Map::from_iter([("omp".to_owned(), json!({}))]),
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start {
+                executable,
+                operation,
+                source,
+            } => write!(
+                formatter,
+                "cannot start AgentMail executable `{}` while {operation}: {source}",
+                executable.to_string_lossy()
+            ),
+            Self::CommandFailed {
+                operation,
+                status,
+                detail,
+            } => write!(
+                formatter,
+                "AgentMail failed while {operation} ({status}): {detail}"
+            ),
+            Self::InvalidJson {
+                operation, output, ..
+            } => write!(
+                formatter,
+                "AgentMail returned invalid JSON while {operation}: {output}"
+            ),
+            Self::InvalidUtf8 { operation, .. } => {
+                write!(formatter, "AgentMail returned non-UTF-8 output while {operation}")
+            }
+            Self::InvalidReceipt { reason } => {
+                write!(formatter, "AgentMail returned an invalid handoff receipt: {reason}")
+            }
+            Self::InvalidMailHeader { reason } => {
+                write!(formatter, "AgentMail returned an invalid report envelope: {reason}")
+            }
+            Self::MultipleReports {
+                task_id,
+                run_id,
+                count,
+            } => write!(
+                formatter,
+                "multiple unread AgentMail reports match task `{task_id}` run `{run_id}`: found {count}"
+            ),
+            Self::InvalidReportJson { message_id, .. } => write!(
+                formatter,
+                "AgentMail report `{message_id}` body is not valid report JSON"
+            ),
+            Self::ReportCorrelation {
+                task_id,
+                run_id,
+                expected_task_id,
+                expected_run_id,
+            } => write!(
+                formatter,
+                "worker report belongs to task `{task_id}` run `{run_id}`, expected task `{expected_task_id}` run `{expected_run_id}`"
+            ),
+            Self::CompletedWithoutDeliverable => {
+                formatter.write_str("completed worker report must include a commit or artifact")
+            }
+            Self::CompletedWithoutEvidence => formatter
+                .write_str("completed worker report must include non-empty validation evidence"),
+            Self::TerminalReportWithoutSummary { status } => write!(
+                formatter,
+                "{status:?} worker report must include a non-empty summary"
+            ),
+            Self::SqStatusMismatch {
+                task_id,
+                report_status,
+                sq_status,
+            } => write!(
+                formatter,
+                "worker reported task `{task_id}` {report_status:?} but SQ status is `{sq_status}`"
+            ),
         }
     }
+}
 
-    #[test]
-    fn handoff_contains_every_execution_boundary() {
-        let orchestrator = identity("Orchestrator", "orchestrator");
-        let worker = identity("Worker", "worker");
-        let dependencies = vec!["dep".to_owned()];
-        let acceptance = vec!["observable behavior".to_owned()];
-        let checks = vec!["cargo test focused".to_owned()];
-        let handoff = Handoff {
-            run_id: "run",
-            task_id: "task",
-            queue: Path::new("/repo/.sift/issues.jsonl"),
-            worktree: Path::new("/repo.task"),
-            branch: "agent/task",
-            dependencies: &dependencies,
-            acceptance_criteria: &acceptance,
-            validation_checks: &checks,
-            orchestrator: &orchestrator,
-            worker: &worker,
-        };
-        let body = handoff_body(&handoff);
-
-        for expected in [
-            "Orchestrator: Orchestrator (orchestrator)",
-            "Worker: Worker (worker)",
-            "Task ID: task",
-            "Canonical SQ queue: /repo/.sift/issues.jsonl",
-            "Worktree: /repo.task",
-            "Branch: agent/task",
-            "Dependencies: dep",
-            "observable behavior",
-            "cargo test focused",
-        ] {
-            assert!(body.contains(expected), "missing {expected}");
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Start { source, .. } => Some(source),
+            Self::InvalidJson { source, .. } | Self::InvalidReportJson { source, .. } => {
+                Some(source)
+            }
+            Self::InvalidUtf8 { source, .. } => Some(source),
+            _ => None,
         }
-    }
-
-    #[test]
-    fn completion_report_requires_deliverable_and_evidence() {
-        let mut report = WorkerReport {
-            task_id: "task".to_owned(),
-            run_id: "run".to_owned(),
-            status: ReportStatus::Completed,
-            commit: None,
-            artifact: None,
-            evidence: Vec::new(),
-            summary: None,
-        };
-        assert!(report.validate("task", "run").is_err());
-        report.artifact = Some("artifact://result".to_owned());
-        report.evidence.push("cargo test: passed".to_owned());
-        report.validate("task", "run").unwrap();
-    }
-
-    #[test]
-    fn completion_requires_matching_closed_sq_transition() {
-        let report = WorkerReport {
-            task_id: "task".to_owned(),
-            run_id: "run".to_owned(),
-            status: ReportStatus::Completed,
-            commit: Some("abc123".to_owned()),
-            artifact: None,
-            evidence: vec!["cargo test: passed".to_owned()],
-            summary: None,
-        };
-
-        assert_eq!(
-            reconcile_report(&TaskStatus::Closed, &report).unwrap(),
-            ReportDisposition::Completed
-        );
-        assert!(reconcile_report(&TaskStatus::InProgress, &report).is_err());
-    }
-
-    #[test]
-    fn parses_json_body_after_mail_headers() {
-        let message = "From: worker\nSubject: report\n\n{\"task_id\":\"task\"}";
-        assert_eq!(message_body(message), r#"{"task_id":"task"}"#);
     }
 }

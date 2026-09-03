@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+: "${AGENT_ORCHESTRATOR_FIXTURE_STATE:?}"
+
+command_name=${1-}
+shift || true
+case "$command_name" in
+  send)
+    to=
+    from=
+    subject=
+    body=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --to) to=$2; shift 2 ;;
+        --from) from=$2; shift 2 ;;
+        --reply-to) shift 2 ;;
+        --subject) subject=$2; shift 2 ;;
+        --body) body=$2; shift 2 ;;
+        --json) shift ;;
+        *) printf 'unsupported AgentMail send argument: %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+    handoff=${subject#agent-orchestrator handoff }
+    task_id=${handoff%% *}
+    run_id=${handoff#* }
+    printf '%s\n' "$run_id" > "$AGENT_ORCHESTRATOR_FIXTURE_STATE/run-id"
+    printf '%s\n' "$body" > "$AGENT_ORCHESTRATOR_FIXTURE_STATE/handoff-$task_id"
+    printf '{"id":"handoff-%s","recipient":"%s","sender":"%s","subject":"%s","state":"delivered"}\n' "$task_id" "$to" "$from" "$subject"
+    ;;
+  scan)
+    if [ ! -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-task" ]; then
+      printf '%s\n' '[]'
+      exit 0
+    fi
+    task_id=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-task")
+    run_id=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/run-id")
+    printf '[{"id":"report-%s","sender":"worker-%s","subject":"agent-orchestrator report %s %s"}]\n' "$task_id" "$task_id" "$task_id" "$run_id"
+    ;;
+  read)
+    message_id=${1-}
+    task_id=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-task")
+    run_id=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/run-id")
+    status=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-status")
+    case "$status" in
+      completed)
+        commit=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-commit")
+        body=$(printf '{"task_id":"%s","run_id":"%s","status":"completed","commit":"%s","artifact":null,"evidence":["fixture scenario: passed"],"summary":null}' "$task_id" "$run_id" "$commit")
+        ;;
+      blocked|failed)
+        summary=$(cat "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-summary")
+        body=$(printf '{"task_id":"%s","run_id":"%s","status":"%s","commit":null,"artifact":null,"evidence":[],"summary":"%s"}' "$task_id" "$run_id" "$status" "$summary")
+        ;;
+      *) printf 'unsupported report status: %s\n' "$status" >&2; exit 2 ;;
+    esac
+    printf 'From: worker-%s\nMessage-ID: %s\nSubject: agent-orchestrator report %s %s\n\n%s\n' "$task_id" "$message_id" "$task_id" "$run_id" "$body"
+    if [ "${2-}" != "--peek" ]; then
+      rm -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-task" "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-status" "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-commit" "$AGENT_ORCHESTRATOR_FIXTURE_STATE/report-summary"
+    fi
+    ;;
+  *)
+    printf 'unsupported AgentMail command: %s\n' "$command_name" >&2
+    exit 2
+    ;;
+esac

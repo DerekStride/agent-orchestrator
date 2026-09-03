@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+: "${AGENT_ORCHESTRATOR_FIXTURE_STATE:?}"
+
+command_name=${1-}
+shift || true
+if [ "$command_name" != "edit" ]; then
+  printf 'unsupported sq command: %s\n' "$command_name" >&2
+  exit 2
+fi
+
+task_id=${1-}
+shift || true
+queue=
+status=
+ownership=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --queue) queue=$2; shift 2 ;;
+    --set-status) status=$2; shift 2 ;;
+    --merge-metadata) ownership=$2; shift 2 ;;
+    --json) shift ;;
+    *) printf 'unsupported sq argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$task_id" ] || [ -z "$queue" ] || [ "$status" != "in_progress" ]; then
+  printf 'incomplete sq claim\n' >&2
+  exit 2
+fi
+
+run_id=${ownership#*\"run_id\":\"}
+run_id=${run_id%%\"*}
+template="$AGENT_ORCHESTRATOR_FIXTURE_STATE/sq-$task_id.jsonl"
+if [ -z "$ownership" ] || [ "$run_id" = "$ownership" ] || [ ! -f "$template" ]; then
+  printf 'missing sq ownership or template for %s\n' "$task_id" >&2
+  exit 2
+fi
+
+sed "s/__RUN_ID__/$run_id/g" "$template" > "$queue.tmp"
+mv "$queue.tmp" "$queue"
+printf '{"id":"%s","status":"in_progress"}\n' "$task_id"

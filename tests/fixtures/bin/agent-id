@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+: "${AGENT_ORCHESTRATOR_FIXTURE_STATE:?}"
+: "${AGENT_ORCHESTRATOR_FIXTURE_REPO:?}"
+: "${AGENT_ORCHESTRATOR_FIXTURE_WORKTREES:?}"
+
+case "${1-}" in
+  current)
+    printf '{"session_id":"orchestrator-session","name":"Orchestrator Agent","slug":"orchestrator-agent","cwd":"%s","state":{"value":"working"},"extensions":{"omp":{"state":"working"}}}\n' "$AGENT_ORCHESTRATOR_FIXTURE_REPO"
+    ;;
+  discover)
+    if [ -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/identity-missing" ]; then
+      printf '%s\n' '[]'
+      exit 0
+    fi
+    first=true
+    printf '['
+    for worktree in "$AGENT_ORCHESTRATOR_FIXTURE_WORKTREES"/repo.*; do
+      if [ ! -d "$worktree" ]; then
+        continue
+      fi
+      task_id=${worktree##*.}
+      if [ "$first" = true ]; then
+        first=false
+      else
+        printf ','
+      fi
+      printf '{"session_id":"worker-%s-session","name":"Worker %s","slug":"worker-%s","cwd":"%s","state":{"value":"working"},"extensions":{"omp":{"state":"working"}}}' "$task_id" "$task_id" "$task_id" "$worktree"
+    done
+    printf ']\n'
+    ;;
+  *)
+    printf 'unsupported agent-id command: %s\n' "${1-}" >&2
+    exit 2
+    ;;
+esac
