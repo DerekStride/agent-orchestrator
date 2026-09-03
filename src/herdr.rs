@@ -129,13 +129,18 @@ impl Herdr {
             OsStr::new("get"),
             OsStr::new(&handles.agent_name),
         ])?;
+        Self::parse_agent_state(&response)
+    }
+
+    fn parse_agent_state(response: &Value) -> Result<AgentState> {
         let state = [
+            &["result", "agent", "agent_status"][..],
             &["result", "agent", "state"][..],
             &["result", "agent", "status"][..],
             &["result", "state"][..],
         ]
         .into_iter()
-        .find_map(|path| string_at(&response, path))
+        .find_map(|path| string_at(response, path))
         .ok_or_else(|| anyhow::anyhow!("Herdr agent response omitted lifecycle state"))?;
 
         match state {
@@ -258,11 +263,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_supported_agent_states() {
-        let value = serde_json::json!({"result": {"agent": {"state": "blocked"}}});
+    fn parses_current_herdr_agent_status_shape() {
+        let value = serde_json::json!({"result": {"agent": {"agent_status": "blocked"}}});
         assert_eq!(
-            string_at(&value, &["result", "agent", "state"]),
-            Some("blocked")
+            Herdr::parse_agent_state(&value).unwrap(),
+            AgentState::Blocked
         );
     }
 }
