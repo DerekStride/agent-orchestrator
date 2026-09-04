@@ -59,6 +59,8 @@ pub struct RuntimeRecord {
     pub worktree: WorktreePlan,
     pub workspace_id: Option<String>,
     pub pane_id: Option<String>,
+    #[serde(default)]
+    pub workspace_closed: bool,
     pub worker_name: Option<String>,
     pub worker_identity: Option<Identity>,
     pub handoff_receipt: Option<String>,
@@ -80,6 +82,7 @@ impl RuntimeRecord {
             worktree,
             workspace_id: None,
             pane_id: None,
+            workspace_closed: false,
             worker_name: None,
             worker_identity: None,
             handoff_receipt: None,
@@ -215,6 +218,11 @@ impl RuntimeRecord {
             pane_id: self.required(&self.pane_id, "pane_id")?.to_owned(),
         })
     }
+    pub fn record_workspace_closed(&mut self) -> Result<()> {
+        self.require_stage(RuntimeStage::Completed)?;
+        self.workspace_closed = true;
+        Ok(())
+    }
 
     pub fn worker(&self) -> Result<Worker> {
         let workspace = self.workspace()?;
@@ -301,6 +309,12 @@ impl RuntimeRecord {
                     ),
                 });
             }
+        }
+        if self.workspace_closed && self.stage != RuntimeStage::Completed {
+            return Err(Error::HandleMismatch {
+                task_id: self.task_id.clone(),
+                detail: "only completed runtimes may retain a closed workspace".to_owned(),
+            });
         }
         self.worker()?;
         self.identity()?;
@@ -454,7 +468,7 @@ impl RunLedger {
     pub fn is_complete(&self) -> bool {
         self.runtimes
             .values()
-            .all(|runtime| runtime.stage.is_complete())
+            .all(|runtime| runtime.stage.is_complete() && runtime.workspace_closed)
     }
 }
 

@@ -233,6 +233,32 @@ fn herdr_starts_named_omp_and_prompts_only_with_handoff_receipt() {
         .unwrap();
     assert_eq!(client.status(&worker).unwrap(), AgentStatus::Unknown);
 }
+#[test]
+fn herdr_closes_a_workspace_by_id() {
+    let directory = TestDir::new();
+    let arguments = directory.path().join("arguments");
+    let fake = directory.path().join("fake-herdr");
+    write_executable(
+        &fake,
+        &format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' '{{\"result\":{{\"type\":\"ok\"}}}}'\n",
+            shell_quote(&arguments)
+        ),
+    );
+
+    let client = HerdrClient::with_executable(&fake, "orchestrator-test");
+    client.close_workspace("w7").unwrap();
+    assert_eq!(
+        read_arguments(&arguments),
+        vec![
+            "--session".to_owned(),
+            "orchestrator-test".to_owned(),
+            "workspace".to_owned(),
+            "close".to_owned(),
+            "w7".to_owned(),
+        ]
+    );
+}
 
 #[test]
 fn herdr_worker_names_and_lifecycle_are_deterministic_and_non_terminal_by_default() {

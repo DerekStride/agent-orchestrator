@@ -19,6 +19,20 @@ case "$command_name" in
       printf '%s\n' '{"running":true,"compatible":true}'
     fi
     ;;
+  workspace)
+    action=${1-}
+    workspace_id=${2-}
+    if [ "$action" != "close" ] || [ -z "$workspace_id" ]; then
+      printf 'unsupported Herdr workspace action: %s\n' "$action" >&2
+      exit 2
+    fi
+    if [ -f "$AGENT_ORCHESTRATOR_FIXTURE_STATE/herdr-close-fails" ]; then
+      printf 'fixture Herdr workspace close failure\n' >&2
+      exit 2
+    fi
+    printf '%s\n' "$workspace_id" >> "$AGENT_ORCHESTRATOR_FIXTURE_STATE/closed-workspaces"
+    printf '%s\n' '{"result":{"type":"ok"}}'
+    ;;
   worktree)
     action=${1-}
     shift || true

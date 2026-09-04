@@ -228,6 +228,9 @@ fn run_pass(
             if plan.status(&task_id).map_err(Error::Sq)? != TaskStatus::Closed {
                 return Err(Error::CompletedRuntimeReopened { task_id });
             }
+            if !runtime.workspace_closed {
+                close_completed_workspace(store, herdr, ledger, runtime)?;
+            }
             continue;
         }
         if matches!(runtime.stage, RuntimeStage::Blocked | RuntimeStage::Failed) {
@@ -253,7 +256,7 @@ fn run_pass(
         verify_queue_link(&runtime.worktree.path, Some(&ledger.queue)).map_err(Error::Worktree)?;
 
         if runtime.stage == RuntimeStage::ReportReceived {
-            settle_retained_report(store, mail, ledger, runtime)?;
+            settle_retained_report(store, herdr, mail, ledger, runtime)?;
             continue;
         }
 
@@ -292,8 +295,11 @@ fn run_pass(
             )
             .map_err(Error::Mail)?;
             runtime.settle_report().map_err(Error::Runtime)?;
-            ledger.runtimes.insert(task_id.clone(), runtime);
+            ledger.runtimes.insert(task_id.clone(), runtime.clone());
             store.save(ledger).map_err(Error::Runtime)?;
+            if disposition == ReportDisposition::Completed {
+                close_completed_workspace(store, herdr, ledger, runtime)?;
+            }
             match disposition {
                 ReportDisposition::Completed => {}
                 ReportDisposition::Blocked => {
@@ -537,6 +543,7 @@ fn complete_worker_startup(
 
 fn settle_retained_report(
     store: &LedgerStore,
+    herdr: &HerdrClient,
     mail: &AgentMailClient,
     ledger: &mut RunLedger,
     mut runtime: RuntimeRecord,
@@ -549,21 +556,42 @@ fn settle_retained_report(
         })
     })?;
     mail.mark_read(&message_id).map_err(Error::Mail)?;
-    runtime.settle_report().map_err(Error::Runtime)?;
     let status = runtime
         .report
         .as_ref()
         .expect("a report-received runtime retains its report")
         .status
         .clone();
-    ledger.runtimes.insert(task_id.clone(), runtime);
+    runtime.settle_report().map_err(Error::Runtime)?;
+    ledger.runtimes.insert(task_id.clone(), runtime.clone());
     store.save(ledger).map_err(Error::Runtime)?;
+    if status == ReportStatus::Completed {
+        close_completed_workspace(store, herdr, ledger, runtime)?;
+    }
     match status {
         ReportStatus::Completed => Ok(()),
         ReportStatus::Blocked | ReportStatus::Failed => {
             Err(Error::RetainedTerminalReport { task_id, status })
         }
     }
+}
+
+fn close_completed_workspace(
+    store: &LedgerStore,
+    herdr: &HerdrClient,
+    ledger: &mut RunLedger,
+    mut runtime: RuntimeRecord,
+) -> Result<()> {
+    if runtime.workspace_closed {
+        return Ok(());
+    }
+    let workspace = runtime.workspace().map_err(Error::Runtime)?;
+    herdr
+        .close_workspace(&workspace.workspace_id)
+        .map_err(Error::Herdr)?;
+    runtime.record_workspace_closed().map_err(Error::Runtime)?;
+    ledger.runtimes.insert(runtime.task_id.clone(), runtime);
+    store.save(ledger).map_err(Error::Runtime)
 }
 
 fn reject_fresh_in_progress(plan: &ScopedPlan) -> Result<()> {

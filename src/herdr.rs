@@ -202,6 +202,12 @@ impl HerdrClient {
             )?,
         })
     }
+    pub fn close_workspace(&self, workspace_id: &str) -> Result<()> {
+        let response = self.invoke_json("closing Herdr workspace", |command| {
+            command.args(["workspace", "close", workspace_id]);
+        })?;
+        expect_response_type(&response, "closing Herdr workspace", "ok")
+    }
 
     pub fn start_omp(
         &self,

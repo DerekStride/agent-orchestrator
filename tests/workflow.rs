@@ -267,12 +267,46 @@ fn workflow_claims_hands_off_stacks_and_completes_dependency_branches() {
         .unwrap()
         .iter()
         .all(|runtime| runtime["stage"] == "completed"));
+    assert_eq!(
+        fs::read_to_string(scenario.fixture_state.join("closed-workspaces")).unwrap(),
+        "workspace-leaf\nworkspace-root\n"
+    );
+    assert!(scenario.worktree("leaf").is_dir());
+    assert!(scenario.worktree("root").is_dir());
     let ledger = scenario.ledger();
     assert_eq!(ledger["runtimes"]["leaf"]["report"]["status"], "completed");
     assert_eq!(ledger["runtimes"]["root"]["report"]["status"], "completed");
     assert_eq!(
         ledger["runtimes"]["root"]["report"]["evidence"],
         json!(["fixture scenario: passed"])
+    );
+}
+#[test]
+fn completed_task_stays_completed_when_workspace_cleanup_fails() {
+    let scenario = provisioned_root();
+    let run_id = scenario.ledger()["run_id"].as_str().unwrap().to_owned();
+    let commit = commit_work(&scenario.worktree("root"), "root.txt", "root\n", "root");
+    write_queue(
+        &scenario.queue,
+        &[owned(task("root", "closed", &[]), &run_id)],
+    );
+    scenario.set_report("root", "completed", &commit);
+    fs::write(scenario.fixture_state.join("herdr-close-fails"), "").unwrap();
+
+    let error = failure(scenario.finish());
+    assert!(error.contains("Herdr failed while closing Herdr workspace"));
+    assert_eq!(scenario.ledger()["runtimes"]["root"]["stage"], "completed");
+    assert_eq!(
+        scenario.ledger()["runtimes"]["root"]["workspace_closed"],
+        false
+    );
+
+    fs::remove_file(scenario.fixture_state.join("herdr-close-fails")).unwrap();
+    let complete = success_json(scenario.finish());
+    assert_eq!(complete["status"], "complete");
+    assert_eq!(
+        scenario.ledger()["runtimes"]["root"]["workspace_closed"],
+        true
     );
 }
 

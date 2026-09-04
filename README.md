@@ -34,7 +34,7 @@ agent-orchestrator prime
 |---|---|---|
 | SQ | Reads the canonical JSONL queue; persists task claims and run ownership | `AGENT_ORCHESTRATOR_SQ`; queue precedence is `--queue`, `SQ_QUEUE_PATH`, nearest ancestor `.sift/issues.jsonl`, then `<repo>/.sift/issues.jsonl` |
 | Git | Resolves bases, checks ancestry, and validates reported commits | `AGENT_ORCHESTRATOR_GIT` |
-| Herdr | Checks the server, creates worktrees, starts OMP workers, prompts them, and reports lifecycle state | `AGENT_ORCHESTRATOR_HERDR`; session via `HERDR_SESSION` (default `default`) |
+| Herdr | Checks the server, creates worktrees, starts OMP workers, prompts them, reports lifecycle state, and closes completed task workspaces | `AGENT_ORCHESTRATOR_HERDR`; session via `HERDR_SESSION` (default `default`) |
 | Agent ID | Identifies the orchestrator and finds exactly one live OMP identity whose canonical `cwd` is the worker worktree | `AGENT_ORCHESTRATOR_AGENT_ID` |
 | AgentMail | Delivers handoffs and receives correlated terminal reports | `AGENT_ORCHESTRATOR_AGENT_MAIL` |
 
@@ -67,11 +67,11 @@ Each claimed task receives:
 
 The default worktree root is the repository parent. A task without blockers starts at the repository's current `HEAD`. Existing branches from closed blockers are used as stack bases; closed blockers without an orchestration branch are treated as already integrated into `HEAD`. With multiple existing blocker branches, exactly one must descend from all others; otherwise the orchestrator refuses an ambiguous convergence. This stacking makes the final root branch include its dependency commits without an orchestrator-side merge.
 
-Existing branches, worktrees, or untracked queue paths are never replaced. If Git checked out the canonical tracked `.sift/issues.jsonl` path into a worker, the orchestrator marks that path `skip-worktree` before replacing the copy with the canonical absolute symlink. Re-running queue-link setup is idempotent. `finish` does not merge worker branches or remove worker worktrees.
+Existing branches, worktrees, or untracked queue paths are never replaced. If Git checked out the canonical tracked `.sift/issues.jsonl` path into a worker, the orchestrator marks that path `skip-worktree` before replacing the copy with the canonical absolute symlink. Re-running queue-link setup is idempotent. `finish` closes each accepted completed task's Herdr workspace, but does not merge worker branches or remove worker worktrees.
 
 ## Durable ledger and reconciliation
 
-The default state directory is `<repo-parent>/.agent-orchestrator/<repository-name>`; `--state-dir` overrides it. `<root-task-id>.json` records the ULID run ID, created/updated Unix timestamps, immutable plan snapshot, canonical paths, orchestrator identity, and every task's branch, worktree, Herdr handles, worker identity, handoff receipt, rolling lease, heartbeat, last observation error, report message ID, and complete report body. `<root-task-id>.lock` prevents concurrent orchestration of the same root.
+The default state directory is `<repo-parent>/.agent-orchestrator/<repository-name>`; `--state-dir` overrides it. `<root-task-id>.json` records the ULID run ID, created/updated Unix timestamps, immutable plan snapshot, canonical paths, orchestrator identity, and every task's branch, worktree, Herdr handles, worker identity, handoff receipt, rolling lease, heartbeat, last observation error, report message ID, workspace cleanup state, and complete report body. `<root-task-id>.lock` prevents concurrent orchestration of the same root.
 
 A retained ledger must match the requested root, queue, repository, worktree root, orchestrator identity, and current SQ plan. Runtime-only SQ changes—status, timestamps, and matching run ownership—do not count as plan drift. Interrupted provisioning, reset/reopened tasks, replaced identities, missing worktrees, wrong branches, blocked workers, settled workers without reports, and expired observation leases stop the run. Temporary Agent ID or Herdr lookup failures leave the runtime active and are retried by the normal poll loop until the lease expires. Terminal blocked/failed reports remain terminal on later invocations; they are never retried implicitly.
 
